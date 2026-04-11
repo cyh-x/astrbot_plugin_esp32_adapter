@@ -44,7 +44,7 @@ class DeviceSession:
     "ESP32 智能硬件适配器",
     default_config_tmpl={
         "host": "0.0.0.0",
-        "port": 8765,
+        "ws_port": 8765,
         "auth_token": "",           # 可选，用于连接认证
         "audio_save_dir": "./esp32_audio",  # 音频临时保存目录
         "max_audio_duration": 60    # 单次最大录音时长（秒）
@@ -66,7 +66,7 @@ class ESP32PlatformAdapter(Platform):
         
         # 确保音频保存目录存在
         os.makedirs(self.config.get("audio_save_dir", "./esp32_audio"), exist_ok=True)
-
+        logger.debug("ESP32 适配器 __init__ 执行")
     async def send_by_session(self, session: MessageSesion, message_chain: MessageChain):
         """通过会话发送消息（必须实现）"""
         # 调用父类默认实现，内部会找到对应的事件并调用 send 方法
@@ -82,9 +82,9 @@ class ESP32PlatformAdapter(Platform):
     async def run(self):
         """启动 WebSocket 服务端"""
         host = self.config.get("host", "0.0.0.0")
-        port = self.config.get("port", 8765)
+        port = self.config.get("ws_port", 8765)
         auth_token = self.config.get("auth_token", "")
-
+        logger.debug("ESP32 适配器 run 方法被调用")
         logger.info(f"ESP32 适配器启动，监听 {host}:{port}")
 
         async def handler(websocket: WebSocketServerProtocol):
