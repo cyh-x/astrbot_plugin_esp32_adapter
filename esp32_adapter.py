@@ -93,7 +93,14 @@ class ESP32PlatformAdapter(Platform):
             session = None
             try:
                 # 1. 认证与握手
-                headers = websocket.request_headers
+                # 兼容不同版本 websockets 获取请求头的方式
+                if hasattr(websocket, 'request_headers'):
+                    headers = websocket.request_headers
+                elif hasattr(websocket, 'request'):
+                    headers = websocket.request.headers
+                else:
+                    headers = {}
+                    logger.warning("无法获取 WebSocket 请求头，将跳过认证")
                 token = headers.get("Authorization", "").replace("Bearer ", "")
                 if auth_token and token != auth_token:
                     logger.warning(f"认证失败，无效 token: {token}")
