@@ -50,7 +50,7 @@ class DeviceSession:
 class ESP32PlatformAdapter(Platform):
     def __init__(self, platform_config: dict, platform_settings: dict, event_queue: asyncio.Queue) -> None:
         # ✅ 修正：仅传入 event_queue
-        super().__init__(event_queue)
+        super().__init__(platform_config,event_queue)
         self.config = platform_config
         self.settings = platform_settings
 
