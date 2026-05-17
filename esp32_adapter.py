@@ -72,6 +72,7 @@ class ESP32PlatformAdapter(Platform):
         return PlatformMetadata(
             "esp32",
             "ESP32 智能硬件适配器",
+            id='esp32',
         )
 
     async def run(self):
