@@ -47,6 +47,8 @@ class ESP32Event(AstrMessageEvent):
                 await self._send_image(component)
                 
             elif isinstance(component, Record):
+                if component.text:
+                    await self._send_text(component.text)
                 await self._send_audio(component)
                 
             else:
