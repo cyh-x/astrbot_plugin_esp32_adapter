@@ -9,7 +9,8 @@ from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 from astrbot.api.message_components import Plain, Image, Record
 from astrbot.core.utils.io import download_image_by_url
 from astrbot import logger
-
+import time
+from PIL import Image as PILImage
 if TYPE_CHECKING:
     from .esp32_adapter import DeviceSession
 
@@ -72,7 +73,7 @@ class ESP32Event(AstrMessageEvent):
             logger.error(f"发送文本失败: {e}")
 
     async def _send_image(self, image: Image):
-        """发送图片，分片传输"""
+        """发送图片，分片传输（先缩放到 320x240，减少传输量）"""
         # 获取图片本地路径
         img_path = await self._resolve_image_path(image)
         if not img_path or not os.path.exists(img_path):
@@ -80,9 +81,17 @@ class ESP32Event(AstrMessageEvent):
             return
 
         try:
-            file_size = os.path.getsize(img_path)
+            # ★ 用 Pillow 缩放到 ESP32 屏幕分辨率
+            with PILImage.open(img_path) as pil_img:
+                max_w, max_h = 320, 240
+                pil_img.thumbnail((max_w, max_h), PILImage.LANCZOS)
+                temp_dir = os.path.dirname(img_path) or "/AstrBot/data/temp"
+                temp_path = os.path.join(temp_dir, f".esp32_resized_{int(time.time())}.jpg")
+                pil_img.save(temp_path, "JPEG", quality=85)
+
+            file_size = os.path.getsize(temp_path)
             total_chunks = (file_size + IMAGE_CHUNK_SIZE - 1) // IMAGE_CHUNK_SIZE
-            
+
             # 先发送图片元信息
             meta_msg = {
                 "type": "image_start",
@@ -91,34 +100,29 @@ class ESP32Event(AstrMessageEvent):
             }
             await self.websocket.send(json.dumps(meta_msg))
 
-            # 分片发送图片数据
-            with open(img_path, "rb") as f:
+            # 分片发送缩放后的图片数据
+            with open(temp_path, "rb") as f:
                 chunk_index = 0
                 while True:
                     chunk_data = f.read(IMAGE_CHUNK_SIZE)
                     if not chunk_data:
                         break
-                    
-                    # 构造二进制帧头
                     flags = 0x01 if (chunk_index == total_chunks - 1) else 0x00
-                    header = struct.pack(
-                        '<BBH',
-                        FRAME_TYPE_IMAGE_CHUNK,
-                        flags,
-                        len(chunk_data)
-                    )
-                    # 发送二进制帧
+                    header = struct.pack('<BBH', FRAME_TYPE_IMAGE_CHUNK, flags, len(chunk_data))
                     await self.websocket.send(header + chunk_data)
                     chunk_index += 1
-                    
-                    # 适当延迟，避免 ESP32 处理不过来
                     await asyncio.sleep(0.01)
-            
-            logger.info(f"图片发送完成: {img_path}, 分片数: {total_chunks}")
-            
+
+            # 清理临时文件
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
+            logger.info(f"图片发送完成: {img_path} -> 缩放后 {temp_path}, "
+                        f"分片数: {total_chunks}, 大小: {file_size} bytes")
         except Exception as e:
             logger.error(f"发送图片失败: {e}")
-
     async def _send_audio(self, record: Record):
         """发送音频（TTS 结果）"""
         audio_path = await self._resolve_audio_path(record)
