@@ -87,7 +87,7 @@ class ESP32Event(AstrMessageEvent):
                 pil_img.thumbnail((max_w, max_h), PILImage.LANCZOS)
                 temp_dir = os.path.dirname(img_path) or "/AstrBot/data/temp"
                 temp_path = os.path.join(temp_dir, f".esp32_resized_{int(time.time())}.jpg")
-                pil_img.save(temp_path, "JPEG", quality=85)
+                pil_img.convert('RGB').save(temp_path, "JPEG", quality=85)
 
             file_size = os.path.getsize(temp_path)
             total_chunks = (file_size + IMAGE_CHUNK_SIZE - 1) // IMAGE_CHUNK_SIZE
