@@ -208,6 +208,12 @@ class ESP32PlatformAdapter(Platform):
                 conv_mgr = ctx.conversation_manager
                 uid = f"esp32:FriendMessage:{session.device_id}"
                 curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+                if not curr_cid:
+                    try:
+                        curr_cid = await conv_mgr.new_conversation(uid, "esp32")
+                        logger.info(f"为设备 {session.device_id} 创建了新会话: {curr_cid}")
+                    except Exception as e:
+                        logger.warning(f"创建会话失败: {e}")
                 if curr_cid:
                     conv = await conv_mgr.get_conversation(uid, curr_cid)
                     if conv and hasattr(conv, 'history') and isinstance(conv.history, list):
