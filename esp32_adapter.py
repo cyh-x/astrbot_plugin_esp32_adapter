@@ -317,15 +317,15 @@ class ESP32PlatformAdapter(Platform):
 
     async def stop(self):
         """停止适配器"""
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
+        # 1. 先关闭 Live2D（释放 GL 资源）
         try:
             shutdown_global_service()
         except Exception as e:
             logger.warning(f"关闭 Live2D 服务失败: {e}")
-
+    
+        # 2. 再关闭 WebSocket 服务器
         if self.server:
             self.server.close()
             await self.server.wait_closed()
+    
         logger.info("ESP32 适配器已停止")
