@@ -30,16 +30,12 @@ import os
 import re
 import time
 import threading
-import logging
 import subprocess
 import numpy as np
 from PIL import Image
 import io
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logger = logging.getLogger("Live2DService")
+from astrbot import logger
 
 # ---------------------------------------------------------------------------
 # Live2D package discovery
