@@ -31,6 +31,7 @@ import re
 import time
 import threading
 import logging
+import subprocess
 import numpy as np
 from PIL import Image
 import io
@@ -114,6 +115,50 @@ class Live2DService:
         return self._initialized
 
     # ------------------------------------------------------------------
+    # Xvfb management
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ensure_xvfb():
+        """Start Xvfb if it is not already running on the current DISPLAY."""
+        display = os.environ.get('DISPLAY', ':99')
+        display_num = display.lstrip(':')
+
+        # Check whether Xvfb is already listening on the display socket
+        try:
+            import socket
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            result = s.connect_ex(f'/tmp/.X11-unix/X{display_num}')
+            s.close()
+            if result == 0:
+                logger.debug("Xvfb already running on display %s", display)
+                return
+        except Exception:
+            pass
+
+        logger.info("Xvfb not detected on display %s – starting it now ...", display)
+        try:
+            proc = subprocess.Popen(
+                ['Xvfb', display, '-screen', '0', '1024x768x24'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Give Xvfb a moment to boot
+            import time as _time
+            _time.sleep(0.5)
+
+            # Quick sanity check
+            ret = proc.poll()
+            if ret is not None:
+                logger.error("Xvfb exited immediately with code %d – check logs", ret)
+            else:
+                logger.info("Xvfb started (PID %d) on display %s", proc.pid, display)
+        except FileNotFoundError:
+            logger.warning("Xvfb binary not found – install with: apt-get install xvfb")
+        except Exception as exc:
+            logger.warning("Failed to start Xvfb: %s", exc)
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
     def start(self):
@@ -129,7 +174,7 @@ class Live2DService:
         if 'DISPLAY' not in os.environ:
             os.environ['DISPLAY'] = ':99'
             logger.info("DISPLAY not set; defaulted to ':99'")
-
+        self._ensure_xvfb()
         # Initialise Live2D framework + EGL-backed GL
         live2d.init()
         live2d.glInit()
