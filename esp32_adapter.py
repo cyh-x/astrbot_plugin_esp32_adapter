@@ -206,7 +206,7 @@ class ESP32PlatformAdapter(Platform):
                     logger.warning("无法获取 ESP32 Context，跳过 Live2D 注入")
                     raise RuntimeError("context is None")
                 conv_mgr = ctx.conversation_manager
-                uid = f"esp32:friend:{session.device_id}"
+                uid = f"esp32:FriendMessage:{session.device_id}"
                 curr_cid = await conv_mgr.get_curr_conversation_id(uid)
                 if curr_cid:
                     conv = await conv_mgr.get_conversation(uid, curr_cid)
