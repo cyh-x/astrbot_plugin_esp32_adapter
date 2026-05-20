@@ -196,21 +196,72 @@ class ESP32PlatformAdapter(Platform):
             logger.error(f"无效的 JSON 消息: {message}")
 
     async def _handle_text_message(self, session: DeviceSession, text: str):
-        abm = AstrBotMessage()
-        abm.type = MessageType.FRIEND_MESSAGE
-        abm.message_str = text
-        abm.sender = MessageMember(
-            user_id=session.device_id,
-            nickname=f"ESP32_{session.device_id[:6]}"
-        )
-        abm.message = [Plain(text=text)]
-        abm.raw_message = {"text": text, "device_id": session.device_id}
-        abm.self_id = "astrbot"
-        abm.session_id = session.device_id
-        abm.message_id = f"text_{int(time.time())}_{session.device_id}"
-        abm.group_id = None
+            # ---- Live2D 指令注入（从配置读取） ----
+            if self.config.get("live2d_injection_enabled", True):
+                L2D_MARKER = "【L2D_INJECTED】"
+                try:
+                    conv_mgr = self.context.conversation_manager
+                    uid = f"esp32:friend:{session.device_id}"
+                    curr_cid = await conv_mgr.get_curr_conversation_id(uid)
 
-        await self._commit_message_event(abm, session)
+                    if curr_cid:
+                        conv = await conv_mgr.get_conversation(uid, curr_cid)
+                        if conv and hasattr(conv, 'history') and isinstance(conv.history, list):
+                            already_injected = any(
+                                L2D_MARKER in str(msg.get("content", "") if isinstance(msg, dict) else getattr(msg, 'content', ''))
+                                for msg in conv.history
+                            )
+
+                            if not already_injected:
+                                # 从配置读取指令模板和可用动作/表情
+                                prompt_template = self.config.get(
+                                    "live2d_injection_prompt",
+                                    "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。"
+                                )
+                                motions = self.config.get("live2d_available_motions", "Idle, TapBody")
+                                expressions = self.config.get("live2d_available_expressions", "happy, sad, angry")
+
+                                # 将可用动作/表情替换到指令模板中
+                                l2d_instruction = prompt_template.replace(
+                                    "可用动作: Idle, TapBody",
+                                    f"可用动作: {motions}"
+                                ).replace(
+                                    "可用表情: happy, sad, angry",
+                                    f"可用表情: {expressions}"
+                                )
+                                # 确保标记在最前面
+                                if not l2d_instruction.startswith(L2D_MARKER):
+                                    l2d_instruction = L2D_MARKER + "\n" + l2d_instruction
+
+                                conv.history.insert(0, {
+                                    "role": "system",
+                                    "content": l2d_instruction
+                                })
+                                await conv_mgr.update_conversation(
+                                    uid, curr_cid, history=conv.history
+                                )
+                                logger.info(f"已为设备 {session.device_id} 注入 Live2D 指令")
+                except ImportError:
+                    pass
+                except Exception as e:
+                    logger.warning(f"注入 Live2D 指令失败: {e}")
+
+            # ---- 原有消息提交逻辑 ----
+            abm = AstrBotMessage()
+            abm.type = MessageType.FRIEND_MESSAGE
+            abm.message_str = text
+            abm.sender = MessageMember(
+                user_id=session.device_id,
+                nickname=f"ESP32_{session.device_id[:6]}"
+            )
+            abm.message = [Plain(text=text)]
+            abm.raw_message = {"text": text, "device_id": session.device_id}
+            abm.self_id = "astrbot"
+            abm.session_id = session.device_id
+            abm.message_id = f"text_{int(time.time())}_{session.device_id}"
+            abm.group_id = None
+
+            await self._commit_message_event(abm, session)
 
     async def _handle_binary_frame(self, session: DeviceSession, data: bytes):
         if not session.is_receiving_audio:
