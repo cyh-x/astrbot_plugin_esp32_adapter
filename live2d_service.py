@@ -120,7 +120,9 @@ class Live2DService:
     @staticmethod
     def _ensure_xvfb():
         """Start Xvfb if it is not already running on the current DISPLAY."""
-        display = os.environ.get('DISPLAY', ':99')
+        display = os.environ.get('DISPLAY', ':99').strip()
+        if not display:
+            display = ':99'
         display_num = display.lstrip(':')
 
         # Check whether Xvfb is already listening on the display socket
@@ -171,7 +173,7 @@ class Live2DService:
         self._live2d = live2d
 
         # Ensure a DISPLAY is set – required by Mesa's EGL/X11 platform
-        if 'DISPLAY' not in os.environ:
+        if not os.environ.get('DISPLAY', ''):
             os.environ['DISPLAY'] = ':99'
             logger.info("DISPLAY not set; defaulted to ':99'")
         self._ensure_xvfb()
