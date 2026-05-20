@@ -3,7 +3,6 @@ import struct
 import json
 import asyncio
 from typing import TYPE_CHECKING
-
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 from astrbot.api.message_components import Plain, Image, Record
@@ -11,12 +10,17 @@ from astrbot.core.utils.io import download_image_by_url
 from astrbot import logger
 import time
 from PIL import Image as PILImage
+
+# ---- Live2D 集成 ----
+from .live2d_service import get_global_service, shutdown_global_service
+
 if TYPE_CHECKING:
     from .esp32_adapter import DeviceSession
 
 # 二进制帧类型常量（与适配器保持一致）
 FRAME_TYPE_TTS_AUDIO = 0x01
 FRAME_TYPE_IMAGE_CHUNK = 0x02
+FRAME_TYPE_LIVE2D_FRAME = 0x03   # <-- 新增：Live2D 帧类型
 
 # 图片分片大小（字节），可根据 ESP32 内存调整
 IMAGE_CHUNK_SIZE = 1024 * 8  # 8KB
@@ -40,24 +44,104 @@ class ESP32Event(AstrMessageEvent):
         将 AstrBot 回复的消息链发送给 ESP32 设备
         支持 Plain（文本）、Image（图片）、Record（音频）组件
         """
+        # ★ 标记是否已发送 Live2D 帧（避免重复发送）
+        live2d_sent = False
+
         for component in message.chain:
             if isinstance(component, Plain):
-                await self._send_text(component.text)
-                
+                # ---- Live2D 集成处理 ----
+                raw_text = component.text
+                if raw_text:
+                    # 获取全局 Live2D 服务（按需初始化）
+                    l2d_service = get_global_service()
+
+                    # 解析 LLM 输出中的 <motion=...> <expression=...> 标签
+                    clean_text, motion, expression = l2d_service.parse_tags(raw_text)
+
+                    # 发送纯净文本（不含 Live2D 标签）
+                    await self._send_text(clean_text)
+
+                    # 触发 Live2D 动作
+                    if motion:
+                        l2d_service.start_motion(motion)
+                    if expression:
+                        l2d_service.set_expression(expression)
+
+                    # 渲染并发送一帧 Live2D 画面
+                    if not live2d_sent:
+                        await self._send_live2d_frame(l2d_service)
+                        live2d_sent = True
+
             elif isinstance(component, Image):
                 await self._send_image(component)
-                
+
             elif isinstance(component, Record):
                 if component.text:
-                    await self._send_text(component.text)
+                    # Record 也可能附带文本，同样做 Live2D 处理
+                    l2d_service = get_global_service()
+                    clean_text, motion, expression = l2d_service.parse_tags(component.text)
+                    await self._send_text(clean_text)
+                    if motion:
+                        l2d_service.start_motion(motion)
+                    if expression:
+                        l2d_service.set_expression(expression)
+                    if not live2d_sent:
+                        await self._send_live2d_frame(l2d_service)
+                        live2d_sent = True
+
                 await self._send_audio(component)
-                
+
             else:
                 logger.warning(f"ESP32 不支持的消息组件类型: {type(component)}")
 
         # 必须调用父类方法
         await super().send(message)
 
+    # ------------------------------------------------------------------
+    # Live2D 帧发送
+    # ------------------------------------------------------------------
+    async def _send_live2d_frame(self, l2d_service=None):
+        """
+        渲染当前 Live2D 画面并作为二进制帧发送给 ESP32。
+
+        Args:
+            l2d_service: Live2DService 实例；若为 None 则通过全局单例获取。
+        """
+        if l2d_service is None:
+            try:
+                l2d_service = get_global_service()
+            except Exception as e:
+                logger.warning(f"获取 Live2D 服务失败，跳过帧发送: {e}")
+                return
+
+        if not l2d_service.is_initialized():
+            logger.debug("Live2D 未初始化，跳过帧发送")
+            return
+
+        try:
+            jpeg_bytes = l2d_service.render_frame()
+            if jpeg_bytes:
+                # 构造 Live2D 帧头
+                header = struct.pack(
+                    '<BBH',
+                    FRAME_TYPE_LIVE2D_FRAME,
+                    0x00,              # flags（保留）
+                    len(jpeg_bytes)    # payload 大小
+                )
+                await self.websocket.send(header + jpeg_bytes)
+                logger.debug(
+                    f"Live2D 帧已发送: {len(jpeg_bytes)} bytes "
+                    f"(motion={l2d_service._current_motion}, "
+                    f"expr={l2d_service._current_expression})"
+                )
+            else:
+                logger.warning("Live2D 渲染返回空帧")
+        except Exception as e:
+            logger.error(f"发送 Live2D 帧失败: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 文本发送（原有逻辑，仅用于发送纯净文本）
+    # ------------------------------------------------------------------
     async def _send_text(self, text: str):
         """发送文本消息（通过 JSON）"""
         if not text:
@@ -121,8 +205,10 @@ class ESP32Event(AstrMessageEvent):
 
             logger.info(f"图片发送完成: {img_path} -> 缩放后 {temp_path}, "
                         f"分片数: {total_chunks}, 大小: {file_size} bytes")
+
         except Exception as e:
             logger.error(f"发送图片失败: {e}")
+
     async def _send_audio(self, record: Record):
         """发送音频（TTS 结果）"""
         audio_path = await self._resolve_audio_path(record)
@@ -132,7 +218,7 @@ class ESP32Event(AstrMessageEvent):
 
         try:
             file_size = os.path.getsize(audio_path)
-            
+
             # 发送音频开始通知
             meta_msg = {
                 "type": "tts_start",
@@ -147,7 +233,6 @@ class ESP32Event(AstrMessageEvent):
                     chunk_data = f.read(chunk_size)
                     if not chunk_data:
                         break
-                    
                     # 构造音频帧头
                     header = struct.pack(
                         '<BBH',
@@ -157,24 +242,22 @@ class ESP32Event(AstrMessageEvent):
                     )
                     await self.websocket.send(header + chunk_data)
                     await asyncio.sleep(0.01)
-            
+
             # 发送结束标记（空 payload 表示结束）
             end_header = struct.pack('<BBH', FRAME_TYPE_TTS_AUDIO, 0x01, 0)
             await self.websocket.send(end_header)
-            
+
             logger.info(f"音频发送完成: {audio_path}")
-            
+
         except Exception as e:
             logger.error(f"发送音频失败: {e}")
 
     async def _resolve_image_path(self, image: Image) -> str:
         """解析图片组件的本地路径"""
         if image.file:
-            # 如果是本地文件路径
             if image.file.startswith("file://"):
                 return image.file[7:]
             elif image.file.startswith("http"):
-                # 下载网络图片
                 return await download_image_by_url(image.file)
             else:
                 return image.file
@@ -193,7 +276,6 @@ class ESP32Event(AstrMessageEvent):
             return record.file
         elif record.url:
             if record.url.startswith("http"):
-                # 如有需要可下载
-                return await download_image_by_url(record.url)  # 复用下载函数
+                return await download_image_by_url(record.url)
             return record.url
         return ""
