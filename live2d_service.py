@@ -229,6 +229,8 @@ class Live2DService:
             "Live2DService initialised – model=%s size=%dx%d @%dfps",
             self.model_path, self.width, self.height, self.fps,
         )
+        self.start_continuous_rendering()
+
 
     def stop(self):
         """Clean up Live2D resources."""
