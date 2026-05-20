@@ -76,7 +76,9 @@ class ESP32Event(AstrMessageEvent):
                 await self._send_image(component)
 
             elif isinstance(component, Record):
+                logger.info(f"[L2D_DEBUG] Record handler entered, live2d_sent={live2d_sent}") 
                 l2d_service = get_global_service()
+                logger.info(f"[L2D_DEBUG] get_global_service ok, is_initialized={l2d_service.is_initialized()}")
                 if component.text:
                     # Record 也可能附带文本，同样做 Live2D 处理
                     clean_text, motion, expression = l2d_service.parse_tags(component.text)
