@@ -200,9 +200,16 @@ class ESP32PlatformAdapter(Platform):
             if self.config.get("live2d_injection_enabled", True):
                 L2D_MARKER = "【L2D_INJECTED】"
                 try:
-                    conv_mgr = self.context.conversation_manager
-                    uid = f"esp32:friend:{session.device_id}"
-                    curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+                    
+                    from .main import get_esp32_context
+                    ctx = get_esp32_context()
+                    if ctx is None:
+                        logger.warning("无法获取 ESP32 Context，跳过 Live2D 注入")
+                        raise RuntimeError("context is None")
+
+                conv_mgr = ctx.conversation_manager
+                uid = f"esp32:friend:{session.device_id}"
+                curr_cid = await conv_mgr.get_curr_conversation_id(uid)
 
                     if curr_cid:
                         conv = await conv_mgr.get_conversation(uid, curr_cid)
