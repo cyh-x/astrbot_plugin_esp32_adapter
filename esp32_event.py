@@ -115,7 +115,7 @@ class ESP32Event(AstrMessageEvent):
                 return
 
         if not l2d_service.is_initialized():
-            logger.debug("Live2D 未初始化，跳过帧发送")
+            logger.info("Live2D 未初始化，跳过帧发送")
             return
 
         try:
@@ -129,13 +129,13 @@ class ESP32Event(AstrMessageEvent):
                     len(jpeg_bytes)    # payload 大小
                 )
                 await self.websocket.send(header + jpeg_bytes)
-                logger.debug(
+                logger.info(
                     f"Live2D 帧已发送: {len(jpeg_bytes)} bytes "
                     f"(motion={l2d_service._current_motion}, "
                     f"expr={l2d_service._current_expression})"
                 )
             else:
-                logger.warning("Live2D 渲染返回空帧")
+                logger.info("Live2D 渲染返回空帧")
         except Exception as e:
             logger.error(f"发送 Live2D 帧失败: {e}", exc_info=True)
 
