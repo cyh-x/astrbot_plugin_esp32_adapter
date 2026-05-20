@@ -5,11 +5,14 @@ Live2D Service Module
 Provides Live2D model rendering for the ESP32 AstrBot adapter.
 Uses EGL for headless OpenGL rendering and outputs JPEG frames.
 
-Design:
-  A background render thread continuously advances the Live2D model animation
-  and writes the latest frame into a ``_last_frame`` cache.  External callers
-  (e.g. ``_send_live2d_frame``) obtain a frame via ``render_frame()`` which
-  returns the cached JPEG instantly — **zero blocking**.
+Architecture:
+  A background asyncio task (running on the same event loop as the WebSocket
+  handlers) continuously advances the Live2D model animation and writes the
+  latest frame into ``_last_frame``.  External callers obtain a frame via
+  ``render_frame()`` which returns the cached JPEG instantly.
+
+  **No background OS threads are used** — all OpenGL/EGL operations stay on
+  the thread where ``glInit()`` was called, avoiding context-sharing issues.
 
 Usage:
     from live2d_service import Live2DService
@@ -19,9 +22,6 @@ Usage:
 
     # Get the latest cached frame (non-blocking)
     jpeg_bytes = service.render_frame()
-
-    # Send to ESP32 via WebSocket
-    await websocket.send(jpeg_bytes, binary=True)
 
     # Parse LLM response for motion tags
     text, motion = service.parse_tags(llm_response)
@@ -36,6 +36,7 @@ import os
 import re
 import time
 import threading
+import asyncio
 import subprocess
 import numpy as np
 from PIL import Image
@@ -100,10 +101,11 @@ class Live2DService:
         self._model = None
         self._initialized = False
         self._running = False
-        self._render_thread = None
+        self._render_task = None
         self._last_frame = None
         self._last_frame_time = 0.0
         self._lock = threading.Lock()
+        self._event_loop = None
 
         # ---- motion / expression state ----
         self._current_motion = None
@@ -166,7 +168,10 @@ class Live2DService:
     # Lifecycle
     # ------------------------------------------------------------------
     def start(self):
-        """Initialize Live2D, EGL/OpenGL, load the model, and launch background renderer."""
+        """
+        Initialize Live2D, EGL/OpenGL, load the model, and launch the
+        async background render loop on the current event loop.
+        """
         if self._initialized:
             logger.info("start() called but already initialized – no-op.")
             return
@@ -189,35 +194,32 @@ class Live2DService:
         self._model.LoadModelJson(self.model_path)
 
         # ---- viewport -------------------------------------------------
-        # Prefer glad-loaded glViewport (via EGL dispatch); fall back to
-        # ctypes in case the glad symbol hasn't been exposed.
         _gl_viewport_set = False
 
         # Attempt 1 – glad (loaded inside live2d-py)
         try:
             self._live2d.glViewport(0, 0, self.width, self.height)
             _gl_viewport_set = True
+            logger.info("glViewport(0, 0, %d, %d) set OK via glad", self.width, self.height)
         except AttributeError:
-            pass
+            logger.debug("glViewport not found via glad, trying ctypes fallback...")
 
         if not _gl_viewport_set:
-            # Attempt 2 – ctypes fallback
+            # Attempt 2 – ctypes fallback with correct arg types
             try:
-                from ctypes import cdll
+                from ctypes import cdll, c_int
                 libGL = cdll.LoadLibrary("libGL.so.1")
-                glViewport = libGL.glViewport
-                glViewport.restype = None
-                glViewport.argtypes = [int, int, int, int]
-                glViewport(0, 0, self.width, self.height)
+                glViewport_func = libGL.glViewport
+                glViewport_func.restype = None
+                glViewport_func.argtypes = [c_int, c_int, c_int, c_int]
+                glViewport_func(0, 0, self.width, self.height)
                 _gl_viewport_set = True
+                logger.info("glViewport(0, 0, %d, %d) set OK via ctypes", self.width, self.height)
             except Exception as exc:
                 logger.warning(
                     "Could not set glViewport via ctypes fallback: %s. "
                     "Rendering may produce incorrect dimensions.", exc
                 )
-
-        if _gl_viewport_set:
-            logger.info("glViewport(0, 0, %d, %d) set OK", self.width, self.height)
 
         # ---------------------------------------------------------------
         self._initialized = True
@@ -230,9 +232,25 @@ class Live2DService:
         except Exception:
             pass  # model may not have Idle motions
 
-        # Start background rendering thread – continuously advances animation
-        # and caches the latest frame for non-blocking access.
-        self.start_continuous_rendering()
+        # Render the very first frame synchronously NOW, so that the cache
+        # is immediately populated before any caller asks for it.
+        self._render_and_cache()
+        if self._last_frame:
+            logger.info("First frame cached: %d bytes", len(self._last_frame))
+        else:
+            logger.warning("First frame rendering returned None! Check GL configuration.")
+
+        # Start background async task for continuous rendering.
+        # Runs on the SAME event loop (same thread) as glInit() – no GL context issues.
+        self._running = True
+        try:
+            self._event_loop = asyncio.get_event_loop()
+            self._render_task = self._event_loop.create_task(self._async_render_loop())
+            logger.info("Async render loop task created on event loop %s", self._event_loop)
+        except RuntimeError as e:
+            logger.warning("Cannot get event loop for async rendering: %s", e)
+            logger.info("Falling back: only single-frame (static) rendering available. "
+                        "Continuous animation requires an active event loop.")
 
         logger.info(
             "Live2DService initialised – model=%s size=%dx%d @%dfps",
@@ -240,11 +258,11 @@ class Live2DService:
         )
 
     def stop(self):
-        """Clean up Live2D resources and stop background rendering."""
+        """Clean up Live2D resources and stop async rendering."""
         self._running = False
-        if self._render_thread:
-            self._render_thread.join(timeout=2)
-            self._render_thread = None
+        if self._render_task:
+            self._render_task.cancel()
+            self._render_task = None
 
         if self._initialized and self._live2d:
             try:
@@ -303,8 +321,8 @@ class Live2DService:
         """
         Return the latest cached frame immediately (non-blocking).
 
-        The background render thread continuously advances the model animation
-        and writes the newest frame into ``_last_frame``.  This method simply
+        The async render loop continuously advances the model animation and
+        writes the newest frame into ``_last_frame``.  This method simply
         returns that cached value — **zero blocking**.
 
         Returns:
@@ -315,19 +333,16 @@ class Live2DService:
         return self._last_frame
 
     # ------------------------------------------------------------------
-    # Internal rendering (called by background thread only)
+    # Internal rendering (called from the SAME thread as glInit)
     # ------------------------------------------------------------------
     def _render_and_cache(self):
         """
         Render one frame and update internal cache.
 
-        Called by the background render loop.  Holds ``_lock`` only
-        for the duration of the actual render (~20–30 ms), then
-        releases it.  The cached result is immediately available via
-        ``render_frame()``.
+        Holds ``_lock`` only for the duration of the actual render (~20–30 ms).
+        The cached result is immediately available via ``render_frame()``.
 
-        Returns:
-            JPEG ``bytes``, or previous cached frame on failure.
+        **Must be called from the same thread as ``start()`` / ``glInit()``.**
         """
         if not self._initialized or not self._model:
             return None
@@ -408,59 +423,30 @@ class Live2DService:
         return cleaned, motion, expression
 
     # ------------------------------------------------------------------
-    # Continuous rendering (background thread)
+    # Async continuous rendering (on the main event loop)
     # ------------------------------------------------------------------
-    def start_continuous_rendering(self, callback=None):
+    async def _async_render_loop(self):
         """
-        Start a background thread that renders frames continuously.
+        Async background task that renders frames continuously.
 
-        The thread calls ``_render_and_cache()`` at the configured frame rate,
-        updating the internal ``_last_frame`` cache each time.  External code
-        can retrieve the latest frame via ``render_frame()`` without any
-        locking delay.
+        Runs on the SAME event loop (same thread) as ``glInit()``, so
+        there are NO OpenGL context-sharing issues.
 
-        Args:
-            callback: Optional callable ``fn(jpeg_bytes)`` invoked
-                      with each new frame.  If not provided frames are
-                      only stored in ``_last_frame`` cache.
+        Renders at ``self.fps`` frames per second and updates the internal
+        ``_last_frame`` cache each cycle.
         """
-        if self._render_thread and self._render_thread.is_alive():
-            logger.info("Continuous rendering already running.")
-            return
-
-        self._running = True
-        self._render_thread = threading.Thread(
-            target=self._render_loop,
-            args=(callback,),
-            daemon=True,
-        )
-        self._render_thread.start()
-        logger.info("Continuous rendering started (background thread).")
-
-    def stop_continuous_rendering(self):
-        """Stop the background rendering thread."""
-        self._running = False
-
-    def _render_loop(self, callback):
-        """Background render loop."""
-        # Render first frame immediately so the cache is populated
-        # before any external caller asks for it.
-        self._render_and_cache()
-        logger.debug("Background render loop: first frame cached.")
+        logger.info("Async render loop started.")
 
         while self._running:
             t_start = time.time()
-            jpeg_bytes = self._render_and_cache()
-            if jpeg_bytes and callback:
-                try:
-                    callback(jpeg_bytes)
-                except Exception as e:
-                    logger.error("Callback error in render loop: %s", e)
-
+            self._render_and_cache()
             elapsed = time.time() - t_start
+
             sleep_time = max(0.0, self.frame_interval - elapsed)
             if sleep_time > 0:
-                time.sleep(sleep_time)
+                await asyncio.sleep(sleep_time)
+
+        logger.info("Async render loop stopped.")
 
     # ------------------------------------------------------------------
     # Utilities
@@ -506,6 +492,7 @@ def shutdown_global_service():
 # Standalone test
 # ===================================================================
 if __name__ == "__main__":
+    import logging
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -542,7 +529,7 @@ if __name__ == "__main__":
                 f.write(jpeg)
             print(f"  Frame {i}: {len(jpeg)} bytes → {path}")
         else:
-            print(f"  Frame {i}: FAILED")
+            print(f"  Frame {i}: FAILED (no cached frame yet)")
 
     svc.stop()
     print("\nDone.")
