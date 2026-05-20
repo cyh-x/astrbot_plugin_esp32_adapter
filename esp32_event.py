@@ -85,9 +85,9 @@ class ESP32Event(AstrMessageEvent):
                         l2d_service.start_motion(motion)
                     if expression:
                         l2d_service.set_expression(expression)
-                    if not live2d_sent:
-                        await self._send_live2d_frame(l2d_service)
-                        live2d_sent = True
+                if not live2d_sent and l2d_service.is_initialized():
+                    await self._send_live2d_frame(l2d_service)
+                    live2d_sent = True
 
                 await self._send_audio(component)
 
