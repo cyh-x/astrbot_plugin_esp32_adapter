@@ -1,0 +1,25 @@
+{
+  "live2d_injection_enabled": {
+    "description": "是否启用 Live2D 指令注入到对话上下文",
+    "type": "bool",
+    "default": true
+  },
+  "live2d_injection_prompt": {
+    "description": "注入到对话的 Live2D 系统指令",
+    "type": "text",
+    "default": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
+    "hint": "该提示词以 system 角色插入到 ESP32 设备的对话历史最前面，仅首次触发。"
+  },
+  "live2d_available_motions": {
+    "description": "可用的 Live2D 动作列表（LLM可见）",
+    "type": "string",
+    "default": "Idle, TapBody",
+    "hint": "逗号分隔，修改后重启容器"
+  },
+  "live2d_available_expressions": {
+    "description": "可用的 Live2D 表情列表（LLM可见）",
+    "type": "string",
+    "default": "happy, sad, angry",
+    "hint": "逗号分隔，修改后重启容器"
+  }
+}
