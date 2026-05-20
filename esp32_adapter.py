@@ -4,6 +4,7 @@ import struct
 import os
 import time
 from typing import Dict, Optional
+from .live2d_service import shutdown_global_service
 
 import websockets
 from websockets import WebSocketServerProtocol
@@ -316,6 +317,14 @@ class ESP32PlatformAdapter(Platform):
 
     async def stop(self):
         """停止适配器"""
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+        try:
+            shutdown_global_service()
+        except Exception as e:
+            logger.warning(f"关闭 Live2D 服务失败: {e}")
+
         if self.server:
             self.server.close()
             await self.server.wait_closed()
