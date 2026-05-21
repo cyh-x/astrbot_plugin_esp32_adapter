@@ -84,7 +84,8 @@ class Live2DService:
             model_path: Path to .model3.json file.
             width:      Render width  (default: 320 for ESP32 display).
             height:     Render height (default: 240).
-            fps:        Target frame rate (default: 5 — lowered for ESP32 stability).
+            fps:        Target frame rate (default: 5 — 10 was causing ESP32
+                        screen flickering due to decode/refresh speed).
             jpeg_quality: JPEG compression quality 1-100 (default: 80).
         """
         self.model_path = model_path or self.DEFAULT_MODEL_PATH
@@ -333,10 +334,6 @@ class Live2DService:
         """
         if not self._initialized or not self._model:
             return None
-        return self._last_frame
-
-    def get_last_frame(self):
-        """Return the most recently rendered frame (cached)."""
         return self._last_frame
 
     # ------------------------------------------------------------------
