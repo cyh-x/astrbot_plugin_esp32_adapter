@@ -6,13 +6,13 @@ Provides Live2D model rendering for the ESP32 AstrBot adapter.
 Uses EGL for headless OpenGL rendering and outputs JPEG frames.
 
 Architecture:
-  A background asyncio task (running on the same event loop as the WebSocket
-  handlers) continuously advances the Live2D model animation and writes the
-  latest frame into ``_last_frame``.  External callers obtain a frame via
-  ``render_frame()`` which returns the cached JPEG instantly.
+A background asyncio task (running on the same event loop as the WebSocket
+handlers) continuously advances the Live2D model animation and writes the
+latest frame into ``_last_frame``.  External callers obtain a frame via
+``render_frame()`` which returns the cached JPEG instantly.
 
-  **No background OS threads are used** — all OpenGL/EGL operations stay on
-  the thread where ``glInit()`` was called, avoiding context-sharing issues.
+**No background OS threads are used** — all OpenGL/EGL operations stay on
+the thread where ``glInit()`` was called, avoiding context-sharing issues.
 
 Usage:
     from live2d_service import Live2DService
@@ -30,7 +30,6 @@ Usage:
 
     service.stop()
 """
-
 import sys
 import os
 import re
@@ -41,7 +40,6 @@ import subprocess
 import numpy as np
 from PIL import Image
 import io
-
 from astrbot import logger
 
 # ---------------------------------------------------------------------------
@@ -169,7 +167,6 @@ class Live2DService:
             # Give Xvfb a moment to boot
             import time as _time
             _time.sleep(0.5)
-
             # Quick sanity check
             ret = proc.poll()
             if ret is not None:
@@ -200,6 +197,7 @@ class Live2DService:
         if not os.environ.get('DISPLAY', ''):
             os.environ['DISPLAY'] = ':99'
             logger.info("DISPLAY not set; defaulted to ':99'")
+
         self._ensure_xvfb()
 
         # Initialise Live2D framework + EGL-backed GL
@@ -237,8 +235,8 @@ class Live2DService:
                     "Could not set glViewport via ctypes fallback: %s. "
                     "Rendering may produce incorrect dimensions.", exc
                 )
-
         # ---------------------------------------------------------------
+
         self._initialized = True
         self._last_frame_time = time.time()
 
@@ -277,13 +275,11 @@ class Live2DService:
         if self._render_task:
             self._render_task.cancel()
             self._render_task = None
-
         if self._initialized and self._live2d:
             try:
                 self._live2d.dispose()
             except Exception as exc:
                 logger.warning("Error during live2d.dispose(): %s", exc)
-
         self._initialized = False
         self._model = None
         self._live2d = None
@@ -304,10 +300,8 @@ class Live2DService:
         if not self._initialized or not self._model:
             logger.warning("start_motion called but service not initialised.")
             return
-
         if priority is None:
             priority = self._live2d.MotionPriority.FORCE
-
         try:
             self._model.StartMotion(motion_name, 0, priority)
             self._current_motion = motion_name
@@ -320,7 +314,6 @@ class Live2DService:
         if not self._initialized or not self._model:
             logger.warning("set_expression called but service not initialised.")
             return
-
         try:
             self._model.SetExpression(expression_name)
             self._current_expression = expression_name
@@ -342,6 +335,10 @@ class Live2DService:
             return None
         return self._last_frame
 
+    def get_last_frame(self):
+        """Return the most recently rendered frame (cached)."""
+        return self._last_frame
+
     # ------------------------------------------------------------------
     # Internal rendering (called from the SAME thread as glInit)
     # ------------------------------------------------------------------
@@ -353,40 +350,30 @@ class Live2DService:
         """
         if not self._initialized or not self._model:
             return None
-
         with self._lock:
             try:
                 self._model.Update()
                 self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
                 self._model.Draw()
-
                 pixels = self._live2d.readPixels(self.width, self.height)
                 if not pixels:
                     logger.warning("readPixels returned empty.")
                     return self._last_frame
-
                 img_array = (
                     np.frombuffer(pixels, dtype=np.uint8)
                     .reshape(self.height, self.width, 4)
                 )
                 img_array = np.flipud(img_array)
-
                 img = Image.fromarray(img_array[:, :, :3], 'RGB')
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=self.jpeg_quality)
                 jpeg_bytes = buf.getvalue()
-
                 self._last_frame = jpeg_bytes
                 self._last_frame_time = time.time()
                 return jpeg_bytes
-
             except Exception as e:
                 logger.error("Render error: %s", e, exc_info=True)
                 return self._last_frame
-
-    def get_last_frame(self):
-        """Return the most recently rendered frame (cached)."""
-        return self._last_frame
 
     # ------------------------------------------------------------------
     # Tag parsing
@@ -403,18 +390,14 @@ class Live2DService:
         """
         if not text:
             return text, None, None
-
         motion = None
         expression = None
-
         motion_match = self.MOTION_TAG_PATTERN.search(text)
         if motion_match:
             motion = motion_match.group(1).strip()
-
         expr_match = self.EXPRESSION_TAG_PATTERN.search(text)
         if expr_match:
             expression = expr_match.group(1).strip()
-
         cleaned = self.ALL_TAGS_PATTERN.sub('', text).strip()
         return cleaned, motion, expression
 
@@ -424,13 +407,12 @@ class Live2DService:
     async def _async_render_loop(self):
         """
         Async background task that renders frames continuously.
-
         Runs on the SAME event loop (same thread) as ``glInit()``.
+
         If a ``_push_handler`` is registered, each frame is pushed
         to it immediately.
         """
-        logger.info("Async render loop started.")
-
+        logger.info("=== Async render loop started ===")
         while self._running:
             t_start = time.time()
 
@@ -441,7 +423,7 @@ class Live2DService:
                 try:
                     await self._push_handler(self._last_frame)
                 except Exception as e:
-                    logger.debug("Push handler error: %s", e)
+                    logger.info("Push handler error: %s", e)
             # ──────────────────────────────────────────────
 
             elapsed = time.time() - t_start
@@ -500,13 +482,10 @@ if __name__ == "__main__":
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-
     print("Live2DService — Standalone Test")
     print("=" * 50)
-
     svc = Live2DService(fps=5, jpeg_quality=85)
     svc.start()
-
     print("Available motions:", svc.get_available_motions())
 
     test_texts = [
@@ -531,6 +510,6 @@ if __name__ == "__main__":
             print(f"  Frame {i}: {len(jpeg)} bytes → {path}")
         else:
             print(f"  Frame {i}: FAILED (no cached frame yet)")
-
+        time.sleep(0.5)
     svc.stop()
     print("\nDone.")
