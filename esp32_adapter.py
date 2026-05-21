@@ -60,6 +60,8 @@ class ESP32PlatformAdapter(Platform):
         # ── Live2D 实时推送 ──
         self._push_enabled = False
         self._connected_websocket = None  # 当前已连接设备的 websocket
+        # ── 推送日志计数器（每30帧打一次日志） ──
+        self._push_count = 0
         # 确保音频保存目录存在
         os.makedirs(self.config.get("audio_save_dir", "./esp32_audio"), exist_ok=True)
         logger.info("ESP32 适配器 __init__ 完成")
@@ -92,9 +94,12 @@ class ESP32PlatformAdapter(Platform):
                 len(jpeg_bytes)
             )
             await self._connected_websocket.send(header + jpeg_bytes)
-            logger.info(
-                f"Live2D 帧已推送: {len(jpeg_bytes)} bytes"
-            )
+            # 每30帧打一次日志，减少刷屏
+            self._push_count += 1
+            if self._push_count % 30 == 0:
+                logger.info(
+                    f"Live2D 帧已推送: {len(jpeg_bytes)} bytes (push #{self._push_count})"
+                )
         except Exception as e:
             logger.info("Live2D 推送失败: %s", e)
 
@@ -106,6 +111,7 @@ class ESP32PlatformAdapter(Platform):
             l2d_service = get_global_service()
             l2d_service.set_push_handler(self._push_live2d_frame)
             self._push_enabled = True
+            self._push_count = 0
             logger.info("Live2D 实时推送已启用")
         except Exception as e:
             logger.warning("启用 Live2D 推送失败: %s", e)
