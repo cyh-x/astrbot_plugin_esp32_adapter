@@ -3,6 +3,7 @@ import json
 import struct
 import os
 import time
+import random
 from typing import Dict, Optional
 from .live2d_service import get_global_service, shutdown_global_service, Live2DService
 import websockets
@@ -113,8 +114,31 @@ class ESP32PlatformAdapter(Platform):
             self._push_enabled = True
             self._push_count = 0
             logger.info("Live2D 实时推送已启用")
+            # 启动后台自动随机动作（每18-25秒随机触发一次，让角色看起来有生命感）
+            asyncio.create_task(self._auto_motion_task())
         except Exception as e:
             logger.warning("启用 Live2D 推送失败: %s", e)
+
+    async def _auto_motion_task(self):
+        """后台任务：设备连接时周期触发随机动作。"""
+        motions = ['TapBody', 'Idle']
+        while self._push_enabled:
+            try:
+                await asyncio.sleep(random.randint(18, 25))
+                if not self._push_enabled:
+                    break
+                l2d_service = get_global_service()
+                motion = random.choice(motions)
+                l2d_service.start_motion(motion)
+                logger.info(f"🎬 自动触发随机动作: {motion}")
+                # 动作持续7秒后恢复 Idle
+                await asyncio.sleep(7)
+                if self._push_enabled:
+                    l2d_service.start_motion('Idle')
+                    logger.info("↩️ 恢复 Idle 动作")
+            except Exception as e:
+                logger.info(f"自动动作任务异常: {e}")
+            await asyncio.sleep(3)
 
     def _disable_live2d_push(self):
         """禁用 Live2D 实时推送。"""
@@ -151,7 +175,7 @@ class ESP32PlatformAdapter(Platform):
                 else:
                     headers = {}
 
-                # ★★★ 修复：处理 Authorization 多值头（MultipleValuesError）★★★
+                # 修复：处理 Authorization 多值头（MultipleValuesError）
                 try:
                     raw_auth = headers.get("Authorization", "")
                 except Exception:
@@ -318,8 +342,8 @@ class ESP32PlatformAdapter(Platform):
                                 uid, curr_cid, history=conv.history
                             )
                             logger.info(f"已为设备 {session.device_id} 注入 Live2D 指令")
-            except ImportError:
-                pass
+            except ImportError as e:
+                logger.warning(f"导入 get_esp32_context 失败: {e}")
             except Exception as e:
                 logger.warning(f"注入 Live2D 指令失败: {e}")
 
