@@ -111,12 +111,29 @@ class Live2DService:
         self._current_motion = None
         self._current_expression = None
 
+        # ---- 实时推送回调（可选） ----
+        self._push_handler = None
+
     # ------------------------------------------------------------------
     # Public helpers
     # ------------------------------------------------------------------
     def is_initialized(self) -> bool:
         """Return whether the service has been successfully started."""
         return self._initialized
+
+    def set_push_handler(self, handler):
+        """
+        设置实时帧推送回调。
+
+        Args:
+            handler: 异步回调 ``async fn(jpeg_bytes: bytes)``
+                     每渲染一帧就会被调用一次。设为 None 取消推送。
+        """
+        self._push_handler = handler
+        if handler:
+            logger.info("Live2D 实时推送回调已注册")
+        else:
+            logger.info("Live2D 实时推送回调已清除")
 
     # ------------------------------------------------------------------
     # Xvfb management
@@ -232,25 +249,21 @@ class Live2DService:
         except Exception:
             pass  # model may not have Idle motions
 
-        # Render the very first frame synchronously NOW, so that the cache
-        # is immediately populated before any caller asks for it.
+        # Render the very first frame synchronously NOW
         self._render_and_cache()
         if self._last_frame:
             logger.info("First frame cached: %d bytes", len(self._last_frame))
         else:
             logger.warning("First frame rendering returned None! Check GL configuration.")
 
-        # Start background async task for continuous rendering.
-        # Runs on the SAME event loop (same thread) as glInit() – no GL context issues.
+        # Start background async task for continuous rendering
         self._running = True
         try:
             self._event_loop = asyncio.get_event_loop()
             self._render_task = self._event_loop.create_task(self._async_render_loop())
-            logger.info("Async render loop task created on event loop %s", self._event_loop)
+            logger.info("Async render loop task created.")
         except RuntimeError as e:
-            logger.warning("Cannot get event loop for async rendering: %s", e)
-            logger.info("Falling back: only single-frame (static) rendering available. "
-                        "Continuous animation requires an active event loop.")
+            logger.warning("Cannot get event loop: %s. Static rendering only.", e)
 
         logger.info(
             "Live2DService initialised – model=%s size=%dx%d @%dfps",
@@ -260,6 +273,7 @@ class Live2DService:
     def stop(self):
         """Clean up Live2D resources and stop async rendering."""
         self._running = False
+        self._push_handler = None  # 清除推送回调
         if self._render_task:
             self._render_task.cancel()
             self._render_task = None
@@ -321,10 +335,6 @@ class Live2DService:
         """
         Return the latest cached frame immediately (non-blocking).
 
-        The async render loop continuously advances the model animation and
-        writes the newest frame into ``_last_frame``.  This method simply
-        returns that cached value — **zero blocking**.
-
         Returns:
             JPEG ``bytes``, or ``None`` if no frame has been rendered yet.
         """
@@ -339,9 +349,6 @@ class Live2DService:
         """
         Render one frame and update internal cache.
 
-        Holds ``_lock`` only for the duration of the actual render (~20–30 ms).
-        The cached result is immediately available via ``render_frame()``.
-
         **Must be called from the same thread as ``start()`` / ``glInit()``.**
         """
         if not self._initialized or not self._model:
@@ -349,29 +356,21 @@ class Live2DService:
 
         with self._lock:
             try:
-                # Advance model animation
                 self._model.Update()
-
-                # Clear buffer (transparent background)
                 self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
-
-                # Draw
                 self._model.Draw()
 
-                # Read GL framebuffer → raw RGBA bytes
                 pixels = self._live2d.readPixels(self.width, self.height)
                 if not pixels:
                     logger.warning("readPixels returned empty.")
                     return self._last_frame
 
-                # Convert raw bytes → numpy array (RGBA), flip Y
                 img_array = (
                     np.frombuffer(pixels, dtype=np.uint8)
                     .reshape(self.height, self.width, 4)
                 )
                 img_array = np.flipud(img_array)
 
-                # RGBA → RGB → JPEG in memory
                 img = Image.fromarray(img_array[:, :, :3], 'RGB')
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=self.jpeg_quality)
@@ -395,9 +394,6 @@ class Live2DService:
     def parse_tags(self, text):
         """
         Parse Live2D control tags from LLM response text.
-
-        Extracts ``<motion=...>`` and ``<expression=...>`` tags, then returns
-        the cleaned text together with any detected action names.
 
         Args:
             text: Raw LLM response text (may contain tags).
@@ -429,19 +425,26 @@ class Live2DService:
         """
         Async background task that renders frames continuously.
 
-        Runs on the SAME event loop (same thread) as ``glInit()``, so
-        there are NO OpenGL context-sharing issues.
-
-        Renders at ``self.fps`` frames per second and updates the internal
-        ``_last_frame`` cache each cycle.
+        Runs on the SAME event loop (same thread) as ``glInit()``.
+        If a ``_push_handler`` is registered, each frame is pushed
+        to it immediately.
         """
         logger.info("Async render loop started.")
 
         while self._running:
             t_start = time.time()
-            self._render_and_cache()
-            elapsed = time.time() - t_start
 
+            self._render_and_cache()
+
+            # ── 实时推送 ──────────────────────────────────
+            if self._last_frame and self._push_handler:
+                try:
+                    await self._push_handler(self._last_frame)
+                except Exception as e:
+                    logger.debug("Push handler error: %s", e)
+            # ──────────────────────────────────────────────
+
+            elapsed = time.time() - t_start
             sleep_time = max(0.0, self.frame_interval - elapsed)
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
@@ -506,7 +509,6 @@ if __name__ == "__main__":
 
     print("Available motions:", svc.get_available_motions())
 
-    # ---- tag parsing demo ----
     test_texts = [
         "Hello! <motion=wave> How are you?",
         "<motion=TapBody><expression=happy> Great!",
@@ -519,7 +521,6 @@ if __name__ == "__main__":
         print(f"  Input : {t}")
         print(f"  Output: '{clean}' | motion={motion} | expr={expr}\n")
 
-    # ---- render test frames ----
     print("Rendering test frames ...")
     for i in range(3):
         jpeg = svc.render_frame()
