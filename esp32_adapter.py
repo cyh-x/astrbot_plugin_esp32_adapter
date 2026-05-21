@@ -4,12 +4,9 @@ import struct
 import os
 import time
 from typing import Dict, Optional
-
 from .live2d_service import get_global_service, shutdown_global_service, Live2DService
-
 import websockets
 from websockets import WebSocketServerProtocol
-
 from astrbot.api.platform import (
     Platform, AstrBotMessage, MessageMember, PlatformMetadata, MessageType
 )
@@ -18,7 +15,6 @@ from astrbot.api.message_components import Plain, Image, Record
 from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot.api.platform import register_platform_adapter
 from astrbot import logger
-
 from .esp32_event import ESP32Event
 
 # 二进制帧类型常量
@@ -56,18 +52,14 @@ class ESP32PlatformAdapter(Platform):
         super().__init__(platform_config, event_queue)
         self.config = platform_config
         self.settings = platform_settings
-
         # 会话管理
         self.sessions: Dict[str, DeviceSession] = {}
         self.session_lock = asyncio.Lock()
-
         # WebSocket 服务端
         self.server: Optional[websockets.Server] = None
-
         # ── Live2D 实时推送 ──
         self._push_enabled = False
         self._connected_websocket = None  # 当前已连接设备的 websocket
-
         # 确保音频保存目录存在
         os.makedirs(self.config.get("audio_save_dir", "./esp32_audio"), exist_ok=True)
         logger.info("ESP32 适配器 __init__ 完成")
@@ -92,7 +84,6 @@ class ESP32PlatformAdapter(Platform):
         """
         if not jpeg_bytes or not self._connected_websocket:
             return
-
         try:
             header = struct.pack(
                 '<BBH',
@@ -101,14 +92,16 @@ class ESP32PlatformAdapter(Platform):
                 len(jpeg_bytes)
             )
             await self._connected_websocket.send(header + jpeg_bytes)
+            logger.info(
+                f"Live2D 帧已推送: {len(jpeg_bytes)} bytes"
+            )
         except Exception as e:
-            logger.debug("Live2D 推送失败: %s", e)
+            logger.info("Live2D 推送失败: %s", e)
 
     def _enable_live2d_push(self):
         """启用 Live2D 实时推送。"""
         if self._push_enabled:
             return
-
         try:
             l2d_service = get_global_service()
             l2d_service.set_push_handler(self._push_live2d_frame)
@@ -121,13 +114,11 @@ class ESP32PlatformAdapter(Platform):
         """禁用 Live2D 实时推送。"""
         if not self._push_enabled:
             return
-
         try:
             l2d_service = get_global_service()
             l2d_service.set_push_handler(None)
         except Exception:
             pass
-
         self._push_enabled = False
         self._connected_websocket = None
         logger.info("Live2D 实时推送已禁用")
@@ -140,13 +131,11 @@ class ESP32PlatformAdapter(Platform):
         host = self.config.get("host", "0.0.0.0")
         port = self.config.get("ws_port", 8765)
         auth_token = self.config.get("auth_token", "")
-
         logger.info(f"ESP32 适配器启动，监听 {host}:{port}")
 
         async def handler(websocket: WebSocketServerProtocol):
             device_id = None
             session = None
-
             try:
                 # 认证与握手
                 if hasattr(websocket, 'request_headers'):
@@ -156,7 +145,20 @@ class ESP32PlatformAdapter(Platform):
                 else:
                     headers = {}
 
-                token = headers.get("Authorization", "").replace("Bearer ", "")
+                # ★★★ 修复：处理 Authorization 多值头（MultipleValuesError）★★★
+                try:
+                    raw_auth = headers.get("Authorization", "")
+                except Exception:
+                    raw_auth = ""
+                    if hasattr(headers, 'get_all'):
+                        try:
+                            raw_auth = headers.get_all("Authorization", [""])[-1]
+                        except Exception:
+                            pass
+                    elif isinstance(headers, dict):
+                        raw_auth = headers.get("Authorization", "")
+                token = raw_auth.replace("Bearer ", "")
+
                 if auth_token and token != auth_token:
                     logger.warning(f"认证失败，无效 token: {token}")
                     await websocket.close(1008, "Invalid token")
@@ -187,7 +189,6 @@ class ESP32PlatformAdapter(Platform):
                 # 创建会话
                 session = DeviceSession(websocket, device_id)
                 session.audio_params = audio_params
-
                 async with self.session_lock:
                     if device_id in self.sessions:
                         old_session = self.sessions[device_id]
@@ -218,20 +219,17 @@ class ESP32PlatformAdapter(Platform):
                 # ── 设备断开时：清除推送 ──
                 if self._connected_websocket == websocket:
                     self._disable_live2d_push()
-
                 if device_id:
                     async with self.session_lock:
                         if device_id in self.sessions:
                             del self.sessions[device_id]
-                    if session and session.is_receiving_audio:
-                        await self._finalize_audio_message(session)
+                if session and session.is_receiving_audio:
+                    await self._finalize_audio_message(session)
 
         # 启动 WebSocket 服务器
         self.server = await websockets.serve(handler, host, port)
-
         # 后台任务：音频超时检查
         asyncio.create_task(self._check_audio_timeout())
-
         # 保持运行
         await self.server.wait_closed()
 
@@ -242,7 +240,6 @@ class ESP32PlatformAdapter(Platform):
         try:
             data = json.loads(message)
             msg_type = data.get("type")
-
             if msg_type == "start_listening":
                 async with self.session_lock:
                     session.audio_buffer.clear()
@@ -250,21 +247,16 @@ class ESP32PlatformAdapter(Platform):
                     session.last_audio_time = time.time()
                     session.audio_start_time = time.time()
                 logger.debug(f"设备 {session.device_id} 开始上传音频")
-
             elif msg_type == "stop_listening":
                 await self._finalize_audio_message(session)
-
             elif msg_type == "text":
                 text_content = data.get("content", "")
                 if text_content:
                     await self._handle_text_message(session, text_content)
-
             elif msg_type == "ping":
                 await session.websocket.send(json.dumps({"type": "pong"}))
-
             else:
                 logger.warning(f"未知的消息类型: {msg_type}")
-
         except json.JSONDecodeError:
             logger.error(f"无效的 JSON 消息: {message}")
 
@@ -278,10 +270,8 @@ class ESP32PlatformAdapter(Platform):
                 if ctx is None:
                     logger.warning("无法获取 ESP32 Context，跳过 Live2D 注入")
                     raise RuntimeError("context is None")
-
                 conv_mgr = ctx.conversation_manager
                 uid = f"esp32:FriendMessage:{session.device_id}"
-
                 curr_cid = await conv_mgr.get_curr_conversation_id(uid)
                 if not curr_cid:
                     try:
@@ -289,7 +279,6 @@ class ESP32PlatformAdapter(Platform):
                         logger.info(f"为设备 {session.device_id} 创建了新会话: {curr_cid}")
                     except Exception as e:
                         logger.warning(f"创建会话失败: {e}")
-
                 if curr_cid:
                     conv = await conv_mgr.get_conversation(uid, curr_cid)
                     if conv and hasattr(conv, 'history') and isinstance(conv.history, list):
@@ -306,7 +295,6 @@ class ESP32PlatformAdapter(Platform):
                             )
                             motions = self.config.get("live2d_available_motions", "Idle, TapBody")
                             expressions = self.config.get("live2d_available_expressions", "happy, sad, angry")
-
                             l2d_instruction = prompt_template.replace(
                                 "可用动作: Idle, TapBody",
                                 f"可用动作: {motions}"
@@ -314,10 +302,8 @@ class ESP32PlatformAdapter(Platform):
                                 "可用表情: happy, sad, angry",
                                 f"可用表情: {expressions}"
                             )
-
                             if not l2d_instruction.startswith(L2D_MARKER):
                                 l2d_instruction = L2D_MARKER + "\n" + l2d_instruction
-
                             conv.history.insert(0, {
                                 "role": "system",
                                 "content": l2d_instruction
@@ -345,30 +331,25 @@ class ESP32PlatformAdapter(Platform):
         abm.session_id = session.device_id
         abm.message_id = f"text_{int(time.time())}_{session.device_id}"
         abm.group_id = None
-
         await self._commit_message_event(abm, session)
 
     async def _handle_binary_frame(self, session: DeviceSession, data: bytes):
         if not session.is_receiving_audio:
             logger.warning(f"设备 {session.device_id} 未处于接收状态却发送了音频数据")
             return
-
         if len(data) < 4:
             logger.warning("二进制帧太短")
             return
-
         try:
             frame_type, reserved, payload_size = struct.unpack('<BBH', data[:4])
             payload = data[4:4+payload_size]
         except Exception as e:
             logger.error(f"解析二进制帧失败: {e}")
             return
-
         if frame_type == FRAME_TYPE_OPUS_AUDIO:
             async with self.session_lock:
                 session.audio_buffer.extend(payload)
                 session.last_audio_time = time.time()
-
                 max_duration = self.config.get("max_audio_duration", 60)
                 elapsed = time.time() - session.audio_start_time
                 if elapsed > max_duration:
@@ -390,14 +371,13 @@ class ESP32PlatformAdapter(Platform):
                 return
             audio_data = bytes(session.audio_buffer)
             session.audio_buffer.clear()
-            await self._commit_audio_message(session, audio_data)
+        await self._commit_audio_message(session, audio_data)
 
     async def _commit_audio_message(self, session: DeviceSession, audio_data: bytes):
         audio_dir = self.config.get("audio_save_dir", "./esp32_audio")
         timestamp = int(time.time())
         file_ext = "opus" if session.audio_params.get("format") == "opus" else "raw"
         audio_file_path = os.path.join(audio_dir, f"{session.device_id}_{timestamp}.{file_ext}")
-
         with open(audio_file_path, "wb") as f:
             f.write(audio_data)
         logger.info(f"保存音频文件: {audio_file_path}, 大小: {len(audio_data)} bytes")
@@ -415,7 +395,6 @@ class ESP32PlatformAdapter(Platform):
         abm.session_id = session.device_id
         abm.message_id = f"audio_{timestamp}_{session.device_id}"
         abm.group_id = None
-
         await self._commit_message_event(abm, session)
 
     async def _commit_message_event(self, abm: AstrBotMessage, session: DeviceSession):
@@ -451,13 +430,11 @@ class ESP32PlatformAdapter(Platform):
         """停止适配器"""
         # 先关闭 Live2D 推送
         self._disable_live2d_push()
-
         # 再关闭 Live2D（释放 GL 资源）
         try:
             shutdown_global_service()
         except Exception as e:
             logger.warning(f"关闭 Live2D 服务失败: {e}")
-
         # 最后关闭 WebSocket 服务器
         if self.server:
             self.server.close()
