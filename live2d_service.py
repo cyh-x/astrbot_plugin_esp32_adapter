@@ -76,7 +76,7 @@ class Live2DService:
     # __init__
     # ------------------------------------------------------------------
     def __init__(self, model_path=None, width=320, height=240,
-                 fps=10, jpeg_quality=80):
+                 fps=5, jpeg_quality=80):
         """
         Initialize the Live2D service.
 
@@ -84,7 +84,7 @@ class Live2DService:
             model_path: Path to .model3.json file.
             width:      Render width  (default: 320 for ESP32 display).
             height:     Render height (default: 240).
-            fps:        Target frame rate (default: 10).
+            fps:        Target frame rate (default: 5 — lowered for ESP32 stability).
             jpeg_quality: JPEG compression quality 1-100 (default: 80).
         """
         self.model_path = model_path or self.DEFAULT_MODEL_PATH
@@ -240,10 +240,10 @@ class Live2DService:
         self._initialized = True
         self._last_frame_time = time.time()
 
-        # Start idle motion (best-effort)
+        # Start idle motion with NORMAL priority (more visible animation)
         try:
-            self._model.StartMotion("Idle", 0, live2d.MotionPriority.IDLE)
-            logger.debug("Idle motion started.")
+            self._model.StartMotion("Idle", 0, live2d.MotionPriority.NORMAL)
+            logger.info("Idle motion started (priority=NORMAL).")
         except Exception:
             pass  # model may not have Idle motions
 
