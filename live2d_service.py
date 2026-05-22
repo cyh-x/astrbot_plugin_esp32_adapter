@@ -76,7 +76,7 @@ class Live2DService:
     # __init__
     # ------------------------------------------------------------------
     def __init__(self, model_path=None, width=320, height=240,
-                 fps=5, jpeg_quality=80):
+                 fps=10, jpeg_quality=80):
         """
         Initialize the Live2D service.
 
@@ -481,7 +481,7 @@ if __name__ == "__main__":
     )
     print("Live2DService — Standalone Test")
     print("=" * 50)
-    svc = Live2DService(fps=5, jpeg_quality=85)
+    svc = Live2DService(fps=10, jpeg_quality=85)
     svc.start()
     print("Available motions:", svc.get_available_motions())
 
