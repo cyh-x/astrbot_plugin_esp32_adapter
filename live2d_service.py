@@ -191,7 +191,13 @@ class Live2DService:
             logger.info("start() called but already initialized – no-op.")
             return
 
-        import live2d.v3 as live2d
+        # 根据模型文件自动选择 v2 / v3
+        if self.model_path.endswith('.model3.json'):
+            import live2d.v3 as live2d
+            logger.info("使用 Live2D Cubism v3 引擎")
+        else:
+            import live2d.v2 as live2d
+            logger.info("使用 Live2D Cubism v2 引擎（兼容 .moc 格式）")
         self._live2d = live2d
 
         # Ensure a DISPLAY is set – required by Mesa's EGL/X11 platform
