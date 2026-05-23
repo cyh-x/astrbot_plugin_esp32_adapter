@@ -239,6 +239,13 @@ class Live2DService:
             import live2d.v2 as live2d
             logger.info("使用 Live2D Cubism v2 引擎（兼容 .moc 格式）")
         self._live2d = live2d
+        # Monkey-patch: 处理部分模型表情文件为空（0 bytes）导致 json.loads(b'') 报错
+        _original_json_parse = live2d.platform_manager.PlatformManager.jsonParseFromBytes
+        def _safe_json_parse(self_ptr, buf):
+            if not buf or (isinstance(buf, bytes) and len(buf) == 0):
+                return {}
+            return _original_json_parse(self_ptr, buf)
+        live2d.platform_manager.PlatformManager.jsonParseFromBytes = _safe_json_parse
 
         # Ensure a DISPLAY is set – required by Mesa's EGL/X11 platform
         if not os.environ.get('DISPLAY', ''):
