@@ -792,23 +792,23 @@ class Live2DService:
                 )
                 return self._last_frame
     
-                try:
-                    self._model.Update()
-                    self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
-                    self._model.Draw()
-
-                    # ── 自动回归 idle：触发动作播放完一段时间后回到 idle ──
-                    if (self._last_emotion_time > 0
-                        and time.time() - self._last_emotion_time > self._auto_idle_delay
-                        and self._current_motion != self.get_idle_motion_name()):
-                        idle_name = self.get_idle_motion_name()
-                        if idle_name:
-                            self._model.StartMotion(idle_name, 0, self._live2d.MotionPriority.NORMAL)
-                            self._current_motion = idle_name
-                            self._current_expression = 'idle'
-                            self._last_emotion = 'idle'
-                            self._last_emotion_time = 0.0
-                            logger.debug("自动回归空闲动作: %s", idle_name)
+            try:
+                self._model.Update()
+                self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
+                self._model.Draw()
+                
+                # ── 自动回归 idle：触发动作播放完一段时间后回到 idle ──
+                if (self._last_emotion_time > 0
+                    and time.time() - self._last_emotion_time > self._auto_idle_delay
+                    and self._current_motion != self.get_idle_motion_name()):
+                    idle_name = self.get_idle_motion_name()
+                    if idle_name:
+                        self._model.StartMotion(idle_name, 0, self._live2d.MotionPriority.NORMAL)
+                        self._current_motion = idle_name
+                        self._current_expression = 'idle'
+                        self._last_emotion = 'idle'
+                        self._last_emotion_time = 0.0
+                        logger.debug("自动回归空闲动作: %s", idle_name)
  
     
                 # ── 用 glReadPixels 替代 live2d.v2 不支持的 readPixels ──
