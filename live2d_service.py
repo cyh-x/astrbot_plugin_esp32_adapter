@@ -4,31 +4,24 @@ Live2D Service Module
 =====================
 Provides Live2D model rendering for the ESP32 AstrBot adapter.
 Uses EGL for headless OpenGL rendering and outputs JPEG frames.
-
 Architecture:
 A background asyncio task (running on the same event loop as the WebSocket
 handlers) continuously advances the Live2D model animation and writes the
 latest frame into ``_last_frame``.  External callers obtain a frame via
 ``render_frame()`` which returns the cached JPEG instantly.
-
 **No background OS threads are used** — all OpenGL/EGL operations stay on
 the thread where ``glInit()`` was called, avoiding context-sharing issues.
-
 Usage:
-    from live2d_service import Live2DService
-
-    service = Live2DService(model_path="/path/to/model.model3.json")
-    service.start()
-
-    # Get the latest cached frame (non-blocking)
-    jpeg_bytes = service.render_frame()
-
-    # Parse LLM response for motion tags
-    text, motion = service.parse_tags(llm_response)
-    if motion:
-        service.start_motion(motion)
-
-    service.stop()
+from live2d_service import Live2DService
+service = Live2DService(model_path="/path/to/model.model3.json")
+service.start()
+# Get the latest cached frame (non-blocking)
+jpeg_bytes = service.render_frame()
+# Parse LLM response for motion tags
+text, motion = service.parse_tags(llm_response)
+if motion:
+service.start_motion(motion)
+service.stop()
 """
 import sys
 import os
@@ -37,6 +30,7 @@ import time
 import threading
 import asyncio
 import subprocess
+import json
 import numpy as np
 from PIL import Image
 import io
@@ -51,7 +45,6 @@ LIVE2D_PACKAGE_PATH = os.environ.get(
 )
 if LIVE2D_PACKAGE_PATH not in sys.path:
     sys.path.insert(0, LIVE2D_PACKAGE_PATH)
-
 
 # ---------------------------------------------------------------------------
 # Live2DService
@@ -84,8 +77,7 @@ class Live2DService:
             model_path: Path to .model3.json file.
             width:      Render width  (default: 320 for ESP32 display).
             height:     Render height (default: 240).
-            fps:        Target frame rate (default: 5 — 10 was causing ESP32
-                        screen flickering due to decode/refresh speed).
+            fps:        Target frame rate (default: 10).
             jpeg_quality: JPEG compression quality 1-100 (default: 80).
         """
         self.model_path = model_path or self.DEFAULT_MODEL_PATH
@@ -109,6 +101,10 @@ class Live2DService:
         # ---- motion / expression state ----
         self._current_motion = None
         self._current_expression = None
+
+        # ---- 可用动作 / 表情列表（从 model.json 解析） ----
+        self._available_motions = []
+        self._available_expressions = []
 
         # ---- 实时推送回调（可选） ----
         self._push_handler = None
@@ -215,9 +211,11 @@ class Live2DService:
         self._model = live2d.LAppModel()
         self._model.LoadModelJson(self.model_path)
 
+        # 解析 model.json 获取可用动作和表情
+        self._parse_available_from_model_json()
+
         # ---- viewport -------------------------------------------------
         _gl_viewport_set = False
-
         # Attempt 1 – glad (loaded inside live2d-py)
         try:
             self._live2d.glViewport(0, 0, self.width, self.height)
@@ -248,11 +246,15 @@ class Live2DService:
         self._last_frame_time = time.time()
 
         # Start idle motion with NORMAL priority (more visible animation)
-        try:
-            self._model.StartMotion("Idle", 0, live2d.MotionPriority.NORMAL)
-            logger.info("Idle motion started (priority=NORMAL).")
-        except Exception:
-            pass  # model may not have Idle motions
+        idle_name = self.get_idle_motion_name()
+        if idle_name:
+            try:
+                self._model.StartMotion(idle_name, 0, live2d.MotionPriority.NORMAL)
+                logger.info("空闲动作 '%s' 已启动 (priority=NORMAL).", idle_name)
+            except Exception as e:
+                logger.info("启动空闲动作 '%s' 失败: %s", idle_name, e)
+        else:
+            logger.info("模型没有可用的空闲动作")
 
         # Render the very first frame synchronously NOW
         self._render_and_cache()
@@ -271,8 +273,10 @@ class Live2DService:
             logger.warning("Cannot get event loop: %s. Static rendering only.", e)
 
         logger.info(
-            "Live2DService initialised – model=%s size=%dx%d @%dfps",
+            "Live2DService initialised – model=%s size=%dx%d @%dfps "
+            "motions=%d expressions=%d",
             self.model_path, self.width, self.height, self.fps,
+            len(self._available_motions), len(self._available_expressions),
         )
 
     def stop(self):
@@ -327,6 +331,163 @@ class Live2DService:
             logger.info("Set expression: %s", expression_name)
         except Exception as e:
             logger.error("Failed to set expression '%s': %s", expression_name, e)
+
+    # ------------------------------------------------------------------
+    # 可用动作 / 表情查询（动态从 model.json 获取）
+    # ------------------------------------------------------------------
+    def get_available_motions(self):
+        """
+        返回从 model.json 解析到的所有可用动作组名称列表。
+
+        如果模型 API 也提供了动作组，会合并两者并去重。
+        """
+        motions = list(self._available_motions)  # 拷贝
+        # 尝试从模型 API 获取额外动作组（可能更准确）
+        if self._initialized and self._model:
+            try:
+                api_motions = list(self._model.GetMotionGroupNames())
+                for m in api_motions:
+                    if m not in motions:
+                        motions.append(m)
+            except Exception:
+                pass
+        return motions
+
+    def get_available_expressions(self):
+        """
+        返回从 model.json 解析到的所有可用表情名称列表。
+
+        如果模型 API 也提供了表情列表，会合并两者并去重。
+        """
+        expressions = list(self._available_expressions)  # 拷贝
+        # 尝试从模型 API 获取额外表情
+        if self._initialized and self._model:
+            try:
+                # 有些 live2d-py 版本支持 GetExpressionNames()
+                api_exprs = list(self._model.GetExpressionNames())
+                for e in api_exprs:
+                    if e not in expressions:
+                        expressions.append(e)
+            except Exception:
+                pass
+        return expressions
+
+    def get_idle_motion_name(self):
+        """
+        返回最适合作为空闲/待机动作的动作组名称。
+
+        按优先级匹配已知的空闲动作关键词，如果都不匹配则返回第一个可用动作。
+        如果没有可用动作返回 None。
+        """
+        motions = self.get_available_motions()
+        if not motions:
+            return None
+        # 按优先级匹配常见空闲动作名称
+        for candidate in ['idle01', 'idle', 'Idle', 'Idle01', 'Idle_0',
+                          'breath', 'Breath', 'wait', 'Wait']:
+            if candidate in motions:
+                return candidate
+        # 兜底：返回第一个动作
+        return motions[0]
+
+    # ------------------------------------------------------------------
+    # model.json 解析（提取动作组和表情）
+    # ------------------------------------------------------------------
+    def _parse_available_from_model_json(self):
+        """
+        直接读取 model.json 文件，解析 motions 和 expressions 列表。
+        兼容 Live2D v2（model.json）和 v3（.model3.json）格式。
+        """
+        motions = []
+        expressions = []
+
+        try:
+            with open(self.model_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning("[模型] 读取 %s 失败: %s", self.model_path, e)
+            self._available_motions = motions
+            self._available_expressions = expressions
+            return
+
+        # ---------- 提取 motions ----------
+        # v2 格式: "motions": { "idle01": [...], "smile": [...] }
+        # v3 格式: "Motions": { "Idle": [...], "TapBody": [...] }
+        # v3 .model3.json: "FileReferences": { "Motions": { ... } }
+        motions_data = None
+
+        # 尝试 "motions" (v2)
+        raw = data.get('motions')
+        if isinstance(raw, dict):
+            motions_data = raw
+
+        # 尝试 "Motions" (v3 .model.json)
+        if not motions_data:
+            raw = data.get('Motions')
+            if isinstance(raw, dict):
+                motions_data = raw
+
+        # 尝试 FileReferences.Motions (v3 .model3.json)
+        if not motions_data:
+            file_refs = data.get('FileReferences') or {}
+            raw = file_refs.get('Motions')
+            if isinstance(raw, dict):
+                motions_data = raw
+
+        if motions_data:
+            motions = list(motions_data.keys())
+            logger.info("[模型] 从 motions 解析到 %d 个动作组: %s",
+                        len(motions), motions)
+
+        # ---------- 提取 expressions ----------
+        # v2 格式: "expressions": [{"name": "happy", "file": "..."}]
+        # v3 格式: "Expressions": [{"Name": "happy", ...}]
+        # v3 .model3.json: "FileReferences": { "Expressions": [{"Name": "..."}] }
+        expr_list = None
+
+        # 尝试 "expressions" (v2)
+        raw = data.get('expressions')
+        if isinstance(raw, list):
+            expr_list = raw
+
+        # 尝试 "Expressions" (v3 .model.json)
+        if not expr_list:
+            raw = data.get('Expressions')
+            if isinstance(raw, list):
+                expr_list = raw
+
+        # 尝试 FileReferences.Expressions (v3 .model3.json)
+        if not expr_list:
+            file_refs = data.get('FileReferences') or {}
+            raw = file_refs.get('Expressions')
+            if isinstance(raw, list):
+                expr_list = raw
+
+        if expr_list:
+            for expr in expr_list:
+                if not isinstance(expr, dict):
+                    continue
+                # 尝试不同字段名
+                name = (expr.get('name') or expr.get('Name') or
+                        expr.get('Id') or '')
+                if not name:
+                    # 从文件名提取
+                    fname = (expr.get('file') or expr.get('FileName') or '')
+                    name = (fname.replace('.exp3.json', '')
+                                 .replace('.exp.json', '')
+                                 .replace('.json', ''))
+                if name:
+                    expressions.append(name)
+
+            logger.info("[模型] 从 expressions 解析到 %d 个表情: %s",
+                        len(expressions), expressions)
+
+        self._available_motions = motions
+        self._available_expressions = expressions
+
+        logger.info("[模型] 从 %s 解析完成: %d 个动作组, %d 个表情",
+                    os.path.basename(self.model_path),
+                    len(motions), len(expressions))
 
     # ------------------------------------------------------------------
     # Frame rendering – public API (non-blocking)
@@ -411,16 +572,13 @@ class Live2DService:
         """
         Async background task that renders frames continuously.
         Runs on the SAME event loop (same thread) as ``glInit()``.
-
         If a ``_push_handler`` is registered, each frame is pushed
         to it immediately.
         """
         logger.info("=== Async render loop started ===")
         while self._running:
             t_start = time.time()
-
             self._render_and_cache()
-
             # ── 实时推送 ──────────────────────────────────
             if self._last_frame and self._push_handler:
                 try:
@@ -428,25 +586,11 @@ class Live2DService:
                 except Exception as e:
                     logger.info("Push handler error: %s", e)
             # ──────────────────────────────────────────────
-
             elapsed = time.time() - t_start
             sleep_time = max(0.0, self.frame_interval - elapsed)
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
-
         logger.info("Async render loop stopped.")
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
-    def get_available_motions(self):
-        """Return list of available motion group names."""
-        if not self._initialized or not self._model:
-            return []
-        try:
-            return list(self._model.GetMotionGroupNames())
-        except Exception:
-            return []
 
 
 # ===================================================================
@@ -490,6 +634,8 @@ if __name__ == "__main__":
     svc = Live2DService(fps=10, jpeg_quality=85)
     svc.start()
     print("Available motions:", svc.get_available_motions())
+    print("Available expressions:", svc.get_available_expressions())
+    print("Idle motion:", svc.get_idle_motion_name())
 
     test_texts = [
         "Hello! <motion=wave> How are you?",
