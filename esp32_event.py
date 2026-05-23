@@ -54,43 +54,43 @@ class ESP32Event(AstrMessageEvent):
                 if raw_text:
                     # 获取全局 Live2D 服务（按需初始化）
                     l2d_service = get_global_service()
-
-                    # 解析 LLM 输出中的 <motion=...> <expression=...> 标签
-                    clean_text, motion, expression = l2d_service.parse_tags(raw_text)
-
+                    # 解析 LLM 输出中的 <motion=...> <expression=...> <emotion=...> 标签
+                    clean_text, motion, expression, emotion = l2d_service.parse_tags(raw_text)
                     # 发送纯净文本（不含 Live2D 标签）
                     await self._send_text(clean_text)
-
-                    # 触发 Live2D 动作
-                    if motion:
-                        l2d_service.start_motion(motion)
-                    if expression:
-                        l2d_service.set_expression(expression)
-
+                    # 触发 Live2D 动作（优先级：emotion > motion+expression）
+                    if emotion:
+                        l2d_service.set_emotion(emotion)
+                    else:
+                        if motion:
+                            l2d_service.start_motion(motion)
+                        if expression:
+                            l2d_service.set_expression(expression)
                     # 渲染并发送一帧 Live2D 画面
                     if not live2d_sent:
                         await self._send_live2d_frame(l2d_service)
-                        live2d_sent = True
+                    live2d_sent = True
 
             elif isinstance(component, Image):
                 await self._send_image(component)
-
+                
             elif isinstance(component, Record):
-                logger.info(f"[L2D_DEBUG] Record handler entered, live2d_sent={live2d_sent}") 
+                logger.debug(f"Record handler, live2d_sent={live2d_sent}") 
                 l2d_service = get_global_service()
-                logger.info(f"[L2D_DEBUG] get_global_service ok, is_initialized={l2d_service.is_initialized()}")
                 if component.text:
                     # Record 也可能附带文本，同样做 Live2D 处理
-                    clean_text, motion, expression = l2d_service.parse_tags(component.text)
+                    clean_text, motion, expression, emotion = l2d_service.parse_tags(component.text)
                     await self._send_text(clean_text)
-                    if motion:
-                        l2d_service.start_motion(motion)
-                    if expression:
-                        l2d_service.set_expression(expression)
-                if not live2d_sent and l2d_service.is_initialized():
-                    await self._send_live2d_frame(l2d_service)
+                    if emotion:
+                        l2d_service.set_emotion(emotion)
+                    else:
+                        if motion:
+                            l2d_service.start_motion(motion)
+                        if expression:
+                            l2d_service.set_expression(expression)
+                    if not live2d_sent and l2d_service.is_initialized():
+                        await self._send_live2d_frame(l2d_service)
                     live2d_sent = True
-
                 await self._send_audio(component)
 
             else:
