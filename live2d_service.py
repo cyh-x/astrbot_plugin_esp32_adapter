@@ -15,6 +15,7 @@ latest frame into ``_last_frame``.  External callers obtain a frame via
 the thread where ``glInit()`` was called, avoiding context-sharing issues.
 
 Usage:
+
     from live2d_service import init_global_service, get_global_service, shutdown_global_service
 
     # 初始化（指定模型路径）
@@ -33,6 +34,7 @@ Usage:
 
     svc.stop()
 """
+
 import sys
 import os
 import re
@@ -101,6 +103,11 @@ class Live2DService:
         self._lock = threading.Lock()
         self._event_loop = None
 
+        # ---- EGL resources (created in start(), used in _render_and_cache) ----
+        self._egl_display = None
+        self._egl_surface = None
+        self._egl_context = None
+
         # ---- motion / expression state ----
         self._current_motion = None
         self._current_expression = None
@@ -119,7 +126,6 @@ class Live2DService:
     def discover_models(models_dir: str) -> dict:
         """
         扫描模型目录，发现所有可用的 Live2D 模型。
-
         遍历 models_dir 下的每个子目录，查找 model.json 或 *.model3.json。
 
         Args:
@@ -132,9 +138,7 @@ class Live2DService:
         models = {}
         if not models_dir or not os.path.isdir(models_dir):
             return models
-
         logger.info("[模型扫描] 扫描目录: %s", models_dir)
-
         for entry in sorted(os.listdir(models_dir)):
             entry_path = os.path.join(models_dir, entry)
             if not os.path.isdir(entry_path):
@@ -145,7 +149,6 @@ class Live2DService:
                     models[entry] = os.path.join(entry_path, f)
                     logger.info("[模型扫描]  发现模型: %s → %s", entry, models[entry])
                     break
-
         logger.info("[模型扫描] 共发现 %d 个模型", len(models))
         return models
 
@@ -204,6 +207,7 @@ class Live2DService:
             # Give Xvfb a moment to boot
             import time as _time
             _time.sleep(0.5)
+
             # Quick sanity check
             ret = proc.poll()
             if ret is not None:
@@ -239,27 +243,28 @@ class Live2DService:
             import live2d.v2 as live2d
             logger.info("使用 Live2D Cubism v2 引擎（兼容 .moc 格式）")
         self._live2d = live2d
+
         # Monkey-patch: 处理部分模型表情文件为空（0 bytes）导致 json.loads(b'') 报错
         _original_json_parse = live2d.platform_manager.PlatformManager.jsonParseFromBytes
+
         def _safe_json_parse(self_ptr, buf):
             if not buf or (isinstance(buf, bytes) and len(buf) == 0):
                 return {}
             return _original_json_parse(self_ptr, buf)
+
         live2d.platform_manager.PlatformManager.jsonParseFromBytes = _safe_json_parse
 
         # Ensure a DISPLAY is set – required by Mesa's EGL/X11 platform
         if not os.environ.get('DISPLAY', ''):
             os.environ['DISPLAY'] = ':99'
             logger.info("DISPLAY not set; defaulted to ':99'")
-
         self._ensure_xvfb()
-
 
         # ── 手动创建 EGL OpenGL 上下文（live2d-py 不自建上下文） ──
         from OpenGL import EGL
-        _egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
+        self._egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
         _major, _minor = EGL.EGLint(), EGL.EGLint()
-        EGL.eglInitialize(_egl_display, _major, _minor)
+        EGL.eglInitialize(self._egl_display, _major, _minor)
         _config_attrs = (EGL.EGLint * 13)(
             EGL.EGL_SURFACE_TYPE, EGL.EGL_PBUFFER_BIT,
             EGL.EGL_RENDERABLE_TYPE, EGL.EGL_OPENGL_BIT,
@@ -270,28 +275,25 @@ class Live2DService:
             EGL.EGL_NONE)
         _cfg = (EGL.EGLConfig * 1)()
         _num = EGL.EGLint()
-        EGL.eglChooseConfig(_egl_display, _config_attrs, _cfg, 1, _num)
+        EGL.eglChooseConfig(self._egl_display, _config_attrs, _cfg, 1, _num)
         _pb_attrs = (EGL.EGLint * 5)(
             EGL.EGL_WIDTH, self.width,
             EGL.EGL_HEIGHT, self.height,
             EGL.EGL_NONE)
-        _surface = EGL.eglCreatePbufferSurface(_egl_display, _cfg[0], _pb_attrs)
+        self._egl_surface = EGL.eglCreatePbufferSurface(self._egl_display, _cfg[0], _pb_attrs)
         EGL.eglBindAPI(EGL.EGL_OPENGL_API)
-        _context = EGL.eglCreateContext(_egl_display, _cfg[0], EGL.EGL_NO_CONTEXT, None)
-        EGL.eglMakeCurrent(_egl_display, _surface, _surface, _context)
+        self._egl_context = EGL.eglCreateContext(self._egl_display, _cfg[0], EGL.EGL_NO_CONTEXT, None)
+        EGL.eglMakeCurrent(self._egl_display, self._egl_surface, self._egl_surface, self._egl_context)
         logger.info("EGL OpenGL 上下文创建成功 (Mesa %s)", _major.value)
-        # ────────────────────────────────────────────────────────────
 
-        # Initialise Live2D framework
-        live2d.init()
-        live2d.glInit()
-        
-        # Initialise Live2D framework + EGL-backed GL
+        # ── 初始化 Live2D 框架 ──
         live2d.init()
         live2d.glInit()
 
-        # Load model
+        # ── 加载模型 ──
         self._model = live2d.LAppModel()
+        # disable_precision=True: GLSL 1.20 不支持 `precision mediump float;`
+        # （这是 OpenGL ES 语法，Mesa 的 GLSL 1.20 编译器不接受）
         self._model.LoadModelJson(self.model_path, disable_precision=True)
 
         # 解析 model.json 获取可用动作和表情
@@ -366,14 +368,17 @@ class Live2DService:
         """Clean up Live2D resources and stop async rendering."""
         self._running = False
         self._push_handler = None  # 清除推送回调
+
         if self._render_task:
             self._render_task.cancel()
             self._render_task = None
+
         if self._initialized and self._live2d:
             try:
                 self._live2d.dispose()
             except Exception as exc:
                 logger.warning("Error during live2d.dispose(): %s", exc)
+
         self._initialized = False
         self._model = None
         self._live2d = None
@@ -525,17 +530,15 @@ class Live2DService:
                 if not name:
                     fname = (expr.get('file') or expr.get('FileName') or '')
                     name = (fname.replace('.exp3.json', '')
-                                 .replace('.exp.json', '')
-                                 .replace('.json', ''))
+                            .replace('.exp.json', '')
+                            .replace('.json', ''))
                 if name:
                     expressions.append(name)
-
             logger.info("[模型] 从 expressions 解析到 %d 个表情: %s",
                         len(expressions), expressions)
 
         self._available_motions = motions
         self._available_expressions = expressions
-
         logger.info("[模型] 从 %s 解析完成: %d 个动作组, %d 个表情",
                     os.path.basename(self.model_path),
                     len(motions), len(expressions))
@@ -560,20 +563,30 @@ class Live2DService:
     def _render_and_cache(self):
         """
         Render one frame and update internal cache.
-
         **Must be called from the same thread as ``start()`` / ``glInit()``.**
         """
         if not self._initialized or not self._model:
             return None
+
+        # ── 每次渲染前重新激活 EGL 上下文（async 循环可能丢失上下文绑定） ──
+        try:
+            from OpenGL import EGL
+            EGL.eglMakeCurrent(self._egl_display, self._egl_surface,
+                               self._egl_surface, self._egl_context)
+        except Exception as ctx_e:
+            logger.warning("eglMakeCurrent in render: %s", ctx_e)
+
         with self._lock:
             try:
                 self._model.Update()
                 self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
                 self._model.Draw()
+
                 pixels = self._live2d.readPixels(self.width, self.height)
                 if not pixels:
                     logger.warning("readPixels returned empty.")
                     return self._last_frame
+
                 img_array = (
                     np.frombuffer(pixels, dtype=np.uint8)
                     .reshape(self.height, self.width, 4)
@@ -583,6 +596,7 @@ class Live2DService:
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=self.jpeg_quality)
                 jpeg_bytes = buf.getvalue()
+
                 self._last_frame = jpeg_bytes
                 self._last_frame_time = time.time()
                 return jpeg_bytes
@@ -605,14 +619,18 @@ class Live2DService:
         """
         if not text:
             return text, None, None
+
         motion = None
         expression = None
+
         motion_match = self.MOTION_TAG_PATTERN.search(text)
         if motion_match:
             motion = motion_match.group(1).strip()
+
         expr_match = self.EXPRESSION_TAG_PATTERN.search(text)
         if expr_match:
             expression = expr_match.group(1).strip()
+
         cleaned = self.ALL_TAGS_PATTERN.sub('', text).strip()
         return cleaned, motion, expression
 
@@ -623,22 +641,27 @@ class Live2DService:
         """
         Async background task that renders frames continuously.
         Runs on the SAME event loop (same thread) as ``glInit()``.
+
         If a ``_push_handler`` is registered, each frame is pushed
         to it immediately.
         """
         logger.info("=== Async render loop started ===")
         while self._running:
             t_start = time.time()
+
             self._render_and_cache()
+
             if self._last_frame and self._push_handler:
                 try:
                     await self._push_handler(self._last_frame)
                 except Exception as e:
                     logger.info("Push handler error: %s", e)
+
             elapsed = time.time() - t_start
             sleep_time = max(0.0, self.frame_interval - elapsed)
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
+
         logger.info("Async render loop stopped.")
 
 
@@ -652,7 +675,6 @@ _global_lock = threading.Lock()
 def init_global_service(model_path: str) -> Live2DService:
     """
     使用指定的模型路径初始化全局 Live2DService 实例。
-
     如果已有实例运行，会先停止旧实例再创建新实例。
 
     Args:
@@ -671,13 +693,12 @@ def init_global_service(model_path: str) -> Live2DService:
         logger.info("初始化 Live2D 服务: model_path=%s", model_path)
         _global_service = Live2DService(model_path=model_path)
         _global_service.start()
-    return _global_service
+        return _global_service
 
 
 def get_global_service() -> Live2DService:
     """
     获取全局 Live2DService 实例。
-
     必须先调用 init_global_service() 初始化，否则抛出 RuntimeError。
 
     Returns:
@@ -710,6 +731,7 @@ if __name__ == "__main__":
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
     print("=" * 60)
     print("Live2DService — 模型自动发现测试")
     print("=" * 60)
