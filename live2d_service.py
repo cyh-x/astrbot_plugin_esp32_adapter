@@ -4,24 +4,34 @@ Live2D Service Module
 =====================
 Provides Live2D model rendering for the ESP32 AstrBot adapter.
 Uses EGL for headless OpenGL rendering and outputs JPEG frames.
+
 Architecture:
 A background asyncio task (running on the same event loop as the WebSocket
 handlers) continuously advances the Live2D model animation and writes the
 latest frame into ``_last_frame``.  External callers obtain a frame via
 ``render_frame()`` which returns the cached JPEG instantly.
+
 **No background OS threads are used** — all OpenGL/EGL operations stay on
 the thread where ``glInit()`` was called, avoiding context-sharing issues.
+
 Usage:
-from live2d_service import Live2DService
-service = Live2DService(model_path="/path/to/model.model3.json")
-service.start()
-# Get the latest cached frame (non-blocking)
-jpeg_bytes = service.render_frame()
-# Parse LLM response for motion tags
-text, motion = service.parse_tags(llm_response)
-if motion:
-service.start_motion(motion)
-service.stop()
+    from live2d_service import init_global_service, get_global_service, shutdown_global_service
+
+    # 初始化（指定模型路径）
+    init_global_service("/tmp/live2d_models/tomori/model.json")
+
+    # 获取实例
+    svc = get_global_service()
+
+    # 获取最新帧（非阻塞）
+    jpeg_bytes = svc.render_frame()
+
+    # 解析 LLM 回复中的动作标签
+    text, motion, expr = svc.parse_tags(llm_response)
+    if motion:
+        svc.start_motion(motion)
+
+    svc.stop()
 """
 import sys
 import os
@@ -46,6 +56,7 @@ LIVE2D_PACKAGE_PATH = os.environ.get(
 if LIVE2D_PACKAGE_PATH not in sys.path:
     sys.path.insert(0, LIVE2D_PACKAGE_PATH)
 
+
 # ---------------------------------------------------------------------------
 # Live2DService
 # ---------------------------------------------------------------------------
@@ -58,14 +69,6 @@ class Live2DService:
     ALL_TAGS_PATTERN = re.compile(r'<[^>]+>')
 
     # ------------------------------------------------------------------
-    # Default paths
-    # ------------------------------------------------------------------
-    DEFAULT_MODEL_PATH = os.environ.get(
-        "LIVE2D_MODEL_PATH",
-        "/tmp/hiyori_model/Hiyori.model3.json"
-    )
-
-    # ------------------------------------------------------------------
     # __init__
     # ------------------------------------------------------------------
     def __init__(self, model_path=None, width=320, height=240,
@@ -74,13 +77,13 @@ class Live2DService:
         Initialize the Live2D service.
 
         Args:
-            model_path: Path to .model3.json file.
+            model_path: Path to model.json or .model3.json file.
             width:      Render width  (default: 320 for ESP32 display).
             height:     Render height (default: 240).
             fps:        Target frame rate (default: 10).
             jpeg_quality: JPEG compression quality 1-100 (default: 80).
         """
-        self.model_path = model_path or self.DEFAULT_MODEL_PATH
+        self.model_path = model_path
         self.width = width
         self.height = height
         self.fps = fps
@@ -108,6 +111,43 @@ class Live2DService:
 
         # ---- 实时推送回调（可选） ----
         self._push_handler = None
+
+    # ------------------------------------------------------------------
+    # 模型自动发现（静态方法）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def discover_models(models_dir: str) -> dict:
+        """
+        扫描模型目录，发现所有可用的 Live2D 模型。
+
+        遍历 models_dir 下的每个子目录，查找 model.json 或 *.model3.json。
+
+        Args:
+            models_dir: 模型存放的根目录。
+
+        Returns:
+            dict: {模型名称(str): model.json完整路径(str)}
+                  模型名称 = 子目录名。
+        """
+        models = {}
+        if not models_dir or not os.path.isdir(models_dir):
+            return models
+
+        logger.info("[模型扫描] 扫描目录: %s", models_dir)
+
+        for entry in sorted(os.listdir(models_dir)):
+            entry_path = os.path.join(models_dir, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            # 在子目录中查找模型定义文件
+            for f in os.listdir(entry_path):
+                if f == 'model.json' or f.endswith('.model3.json'):
+                    models[entry] = os.path.join(entry_path, f)
+                    logger.info("[模型扫描]  发现模型: %s → %s", entry, models[entry])
+                    break
+
+        logger.info("[模型扫描] 共发现 %d 个模型", len(models))
+        return models
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -187,7 +227,11 @@ class Live2DService:
             logger.info("start() called but already initialized – no-op.")
             return
 
-        # 根据模型文件自动选择 v2 / v3
+        if not self.model_path or not os.path.isfile(self.model_path):
+            logger.error("模型文件不存在: %s", self.model_path)
+            raise FileNotFoundError(f"模型文件不存在: {self.model_path}")
+
+        # 根据模型文件后缀自动选择 v2 / v3 引擎
         if self.model_path.endswith('.model3.json'):
             import live2d.v3 as live2d
             logger.info("使用 Live2D Cubism v3 引擎")
@@ -259,21 +303,21 @@ class Live2DService:
         # Render the very first frame synchronously NOW
         self._render_and_cache()
         if self._last_frame:
-            logger.info("First frame cached: %d bytes", len(self._last_frame))
+            logger.info("首帧已缓存: %d bytes", len(self._last_frame))
         else:
-            logger.warning("First frame rendering returned None! Check GL configuration.")
+            logger.warning("首帧渲染返回空！检查 GL 配置。")
 
         # Start background async task for continuous rendering
         self._running = True
         try:
             self._event_loop = asyncio.get_event_loop()
             self._render_task = self._event_loop.create_task(self._async_render_loop())
-            logger.info("Async render loop task created.")
+            logger.info("异步渲染循环任务已创建。")
         except RuntimeError as e:
-            logger.warning("Cannot get event loop: %s. Static rendering only.", e)
+            logger.warning("无法获取事件循环: %s。仅支持静态渲染。", e)
 
         logger.info(
-            "Live2DService initialised – model=%s size=%dx%d @%dfps "
+            "Live2DService 初始化完成 – model=%s size=%dx%d @%dfps "
             "motions=%d expressions=%d",
             self.model_path, self.width, self.height, self.fps,
             len(self._available_motions), len(self._available_expressions),
@@ -294,7 +338,7 @@ class Live2DService:
         self._initialized = False
         self._model = None
         self._live2d = None
-        logger.info("Live2DService stopped.")
+        logger.info("Live2DService 已停止。")
 
     # ------------------------------------------------------------------
     # Motion / expression control
@@ -333,16 +377,13 @@ class Live2DService:
             logger.error("Failed to set expression '%s': %s", expression_name, e)
 
     # ------------------------------------------------------------------
-    # 可用动作 / 表情查询（动态从 model.json 获取）
+    # 可用动作 / 表情查询
     # ------------------------------------------------------------------
     def get_available_motions(self):
         """
         返回从 model.json 解析到的所有可用动作组名称列表。
-
-        如果模型 API 也提供了动作组，会合并两者并去重。
         """
-        motions = list(self._available_motions)  # 拷贝
-        # 尝试从模型 API 获取额外动作组（可能更准确）
+        motions = list(self._available_motions)
         if self._initialized and self._model:
             try:
                 api_motions = list(self._model.GetMotionGroupNames())
@@ -356,14 +397,10 @@ class Live2DService:
     def get_available_expressions(self):
         """
         返回从 model.json 解析到的所有可用表情名称列表。
-
-        如果模型 API 也提供了表情列表，会合并两者并去重。
         """
-        expressions = list(self._available_expressions)  # 拷贝
-        # 尝试从模型 API 获取额外表情
+        expressions = list(self._available_expressions)
         if self._initialized and self._model:
             try:
-                # 有些 live2d-py 版本支持 GetExpressionNames()
                 api_exprs = list(self._model.GetExpressionNames())
                 for e in api_exprs:
                     if e not in expressions:
@@ -375,23 +412,18 @@ class Live2DService:
     def get_idle_motion_name(self):
         """
         返回最适合作为空闲/待机动作的动作组名称。
-
-        按优先级匹配已知的空闲动作关键词，如果都不匹配则返回第一个可用动作。
-        如果没有可用动作返回 None。
         """
         motions = self.get_available_motions()
         if not motions:
             return None
-        # 按优先级匹配常见空闲动作名称
         for candidate in ['idle01', 'idle', 'Idle', 'Idle01', 'Idle_0',
                           'breath', 'Breath', 'wait', 'Wait']:
             if candidate in motions:
                 return candidate
-        # 兜底：返回第一个动作
         return motions[0]
 
     # ------------------------------------------------------------------
-    # model.json 解析（提取动作组和表情）
+    # model.json 解析
     # ------------------------------------------------------------------
     def _parse_available_from_model_json(self):
         """
@@ -411,23 +443,14 @@ class Live2DService:
             return
 
         # ---------- 提取 motions ----------
-        # v2 格式: "motions": { "idle01": [...], "smile": [...] }
-        # v3 格式: "Motions": { "Idle": [...], "TapBody": [...] }
-        # v3 .model3.json: "FileReferences": { "Motions": { ... } }
         motions_data = None
-
-        # 尝试 "motions" (v2)
         raw = data.get('motions')
         if isinstance(raw, dict):
             motions_data = raw
-
-        # 尝试 "Motions" (v3 .model.json)
         if not motions_data:
             raw = data.get('Motions')
             if isinstance(raw, dict):
                 motions_data = raw
-
-        # 尝试 FileReferences.Motions (v3 .model3.json)
         if not motions_data:
             file_refs = data.get('FileReferences') or {}
             raw = file_refs.get('Motions')
@@ -440,23 +463,14 @@ class Live2DService:
                         len(motions), motions)
 
         # ---------- 提取 expressions ----------
-        # v2 格式: "expressions": [{"name": "happy", "file": "..."}]
-        # v3 格式: "Expressions": [{"Name": "happy", ...}]
-        # v3 .model3.json: "FileReferences": { "Expressions": [{"Name": "..."}] }
         expr_list = None
-
-        # 尝试 "expressions" (v2)
         raw = data.get('expressions')
         if isinstance(raw, list):
             expr_list = raw
-
-        # 尝试 "Expressions" (v3 .model.json)
         if not expr_list:
             raw = data.get('Expressions')
             if isinstance(raw, list):
                 expr_list = raw
-
-        # 尝试 FileReferences.Expressions (v3 .model3.json)
         if not expr_list:
             file_refs = data.get('FileReferences') or {}
             raw = file_refs.get('Expressions')
@@ -467,11 +481,9 @@ class Live2DService:
             for expr in expr_list:
                 if not isinstance(expr, dict):
                     continue
-                # 尝试不同字段名
                 name = (expr.get('name') or expr.get('Name') or
                         expr.get('Id') or '')
                 if not name:
-                    # 从文件名提取
                     fname = (expr.get('file') or expr.get('FileName') or '')
                     name = (fname.replace('.exp3.json', '')
                                  .replace('.exp.json', '')
@@ -504,7 +516,7 @@ class Live2DService:
         return self._last_frame
 
     # ------------------------------------------------------------------
-    # Internal rendering (called from the SAME thread as glInit)
+    # Internal rendering
     # ------------------------------------------------------------------
     def _render_and_cache(self):
         """
@@ -566,7 +578,7 @@ class Live2DService:
         return cleaned, motion, expression
 
     # ------------------------------------------------------------------
-    # Async continuous rendering (on the main event loop)
+    # Async continuous rendering
     # ------------------------------------------------------------------
     async def _async_render_loop(self):
         """
@@ -579,13 +591,11 @@ class Live2DService:
         while self._running:
             t_start = time.time()
             self._render_and_cache()
-            # ── 实时推送 ──────────────────────────────────
             if self._last_frame and self._push_handler:
                 try:
                     await self._push_handler(self._last_frame)
                 except Exception as e:
                     logger.info("Push handler error: %s", e)
-            # ──────────────────────────────────────────────
             elapsed = time.time() - t_start
             sleep_time = max(0.0, self.frame_interval - elapsed)
             if sleep_time > 0:
@@ -600,14 +610,45 @@ _global_service = None
 _global_lock = threading.Lock()
 
 
+def init_global_service(model_path: str) -> Live2DService:
+    """
+    使用指定的模型路径初始化全局 Live2DService 实例。
+
+    如果已有实例运行，会先停止旧实例再创建新实例。
+
+    Args:
+        model_path: model.json 或 .model3.json 的完整路径。
+
+    Returns:
+        Live2DService 实例（已启动）。
+    """
+    global _global_service
+    with _global_lock:
+        if _global_service is not None:
+            logger.info("停止旧 Live2D 服务以加载新模型...")
+            _global_service.stop()
+            _global_service = None
+
+        logger.info("初始化 Live2D 服务: model_path=%s", model_path)
+        _global_service = Live2DService(model_path=model_path)
+        _global_service.start()
+    return _global_service
+
+
 def get_global_service() -> Live2DService:
-    """Return the global Live2DService instance (lazy-initialised)."""
+    """
+    获取全局 Live2DService 实例。
+
+    必须先调用 init_global_service() 初始化，否则抛出 RuntimeError。
+
+    Returns:
+        Live2DService 实例。
+    """
     global _global_service
     if _global_service is None:
-        with _global_lock:
-            if _global_service is None:
-                _global_service = Live2DService()
-                _global_service.start()
+        raise RuntimeError(
+            "Live2DService 未初始化。请先调用 init_global_service(model_path) 初始化。"
+        )
     return _global_service
 
 
@@ -618,6 +659,7 @@ def shutdown_global_service():
         if _global_service is not None:
             _global_service.stop()
             _global_service = None
+        logger.info("全局 Live2D 服务已关闭。")
 
 
 # ===================================================================
@@ -629,36 +671,19 @@ if __name__ == "__main__":
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    print("Live2DService — Standalone Test")
-    print("=" * 50)
-    svc = Live2DService(fps=10, jpeg_quality=85)
-    svc.start()
-    print("Available motions:", svc.get_available_motions())
-    print("Available expressions:", svc.get_available_expressions())
-    print("Idle motion:", svc.get_idle_motion_name())
+    print("=" * 60)
+    print("Live2DService — 模型自动发现测试")
+    print("=" * 60)
 
-    test_texts = [
-        "Hello! <motion=wave> How are you?",
-        "<motion=TapBody><expression=happy> Great!",
-        "No tags here",
-        "<motion=bye> Goodbye! <expression=sad>",
-    ]
-    print("\nTag parsing tests:\n")
-    for t in test_texts:
-        clean, motion, expr = svc.parse_tags(t)
-        print(f"  Input : {t}")
-        print(f"  Output: '{clean}' | motion={motion} | expr={expr}\n")
+    # 测试模型发现
+    test_dir = "/tmp/live2d_models"
+    print(f"\n扫描目录: {test_dir}")
+    found = Live2DService.discover_models(test_dir)
+    if found:
+        print(f"发现 {len(found)} 个模型:")
+        for name, path in found.items():
+            print(f"  [{name}] → {path}")
+    else:
+        print(f"  未发现模型，请将模型放入 {test_dir} 下的子目录中")
 
-    print("Rendering test frames ...")
-    for i in range(3):
-        jpeg = svc.render_frame()
-        if jpeg:
-            path = f"/tmp/live2d_frames/service_test_{i}.jpg"
-            with open(path, "wb") as f:
-                f.write(jpeg)
-            print(f"  Frame {i}: {len(jpeg)} bytes → {path}")
-        else:
-            print(f"  Frame {i}: FAILED (no cached frame yet)")
-        time.sleep(0.5)
-    svc.stop()
     print("\nDone.")
