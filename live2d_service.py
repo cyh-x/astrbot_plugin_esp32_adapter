@@ -284,6 +284,12 @@ class Live2DService:
         EGL.eglBindAPI(EGL.EGL_OPENGL_API)
         self._egl_context = EGL.eglCreateContext(self._egl_display, _cfg[0], EGL.EGL_NO_CONTEXT, None)
         EGL.eglMakeCurrent(self._egl_display, self._egl_surface, self._egl_surface, self._egl_context)
+        import ctypes
+        _egl_lib = ctypes.CDLL("libEGL.so.1")
+        _egl_get_ctx = _egl_lib.eglGetCurrentContext
+        _egl_get_ctx.restype = ctypes.c_void_p
+        from OpenGL import platform
+        platform.GetCurrentContext = _egl_get_ctx
         logger.info("EGL OpenGL 上下文创建成功 (Mesa %s)", _major.value)
 
         # ── 初始化 Live2D 框架 ──
