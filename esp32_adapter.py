@@ -6,7 +6,10 @@ import time
 import random
 from typing import Dict, Optional
 
-from .live2d_service import get_global_service, shutdown_global_service, Live2DService
+from .live2d_service import (
+    init_global_service, get_global_service,
+    shutdown_global_service, Live2DService
+)
 
 import websockets
 from websockets import WebSocketServerProtocol
@@ -52,7 +55,9 @@ class DeviceSession:
         "audio_save_dir": "./esp32_audio",
         "max_audio_duration": 60,
         "live2d_injection_enabled": True,
-        "live2d_injection_prompt": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。"
+        "live2d_injection_prompt": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
+        "live2d_models_dir": "/tmp/live2d_models",
+        "live2d_model_name": "",
     }
 )
 class ESP32PlatformAdapter(Platform):
@@ -91,6 +96,54 @@ class ESP32PlatformAdapter(Platform):
         )
 
     # ------------------------------------------------------------------
+    # 模型路径解析（从配置 + 自动发现）
+    # ------------------------------------------------------------------
+    def _resolve_model_path(self) -> str:
+        """
+        从配置解析模型路径。
+
+        流程：
+        1. 读取 `live2d_models_dir` 配置项
+        2. 扫描该目录下的所有子目录，发现可用模型
+        3. 如果 `live2d_model_name` 已配置且存在，选中该模型
+        4. 否则自动选择第一个发现的模型
+
+        Returns:
+            模型文件完整路径（str）。
+
+        Raises:
+            FileNotFoundError: 未发现任何模型时抛出。
+        """
+        models_dir = self.config.get("live2d_models_dir", "/tmp/live2d_models")
+        model_name = self.config.get("live2d_model_name", "")
+
+        # 扫描可用模型
+        available = Live2DService.discover_models(models_dir)
+
+        if not available:
+            raise FileNotFoundError(
+                f"在 {models_dir} 下未发现任何 Live2D 模型。"
+                f"请将模型文件夹放入该目录（每个子目录需包含 model.json 或 *.model3.json）。"
+            )
+
+        # 如果配置了模型名称
+        if model_name:
+            if model_name in available:
+                logger.info("使用配置的模型: %s → %s", model_name, available[model_name])
+                return available[model_name]
+            else:
+                logger.warning(
+                    "配置的模型 '%s' 未找到。可用模型: %s。将自动选择第一个。",
+                    model_name, list(available.keys())
+                )
+
+        # 自动选择第一个
+        first_name = list(available.keys())[0]
+        first_path = available[first_name]
+        logger.info("自动选择模型: [%s] → %s", first_name, first_path)
+        return first_path
+
+    # ------------------------------------------------------------------
     # Live2D 实时推送
     # ------------------------------------------------------------------
     async def _push_live2d_frame(self, jpeg_bytes: bytes):
@@ -117,6 +170,10 @@ class ESP32PlatformAdapter(Platform):
         if self._push_enabled:
             return
         try:
+            # 从配置解析模型路径，初始化 Live2D 服务
+            model_path = self._resolve_model_path()
+            init_global_service(model_path)
+
             l2d_service = get_global_service()
             l2d_service.set_push_handler(self._push_live2d_frame)
             self._push_enabled = True
@@ -124,13 +181,14 @@ class ESP32PlatformAdapter(Platform):
             logger.info("Live2D 实时推送已启用")
             # 启动后台自动随机动作
             asyncio.create_task(self._auto_motion_task())
+        except FileNotFoundError as e:
+            logger.error("启用 Live2D 推送失败: %s", e)
         except Exception as e:
             logger.warning("启用 Live2D 推送失败: %s", e)
 
     async def _auto_motion_task(self):
         """
         后台任务：周期触发随机动作，从模型自动读取可用动作列表。
-        首次触发时选择第一个非空闲动作来验证动作系统工作正常。
         """
         first_time = True
         while self._push_enabled:
@@ -321,7 +379,6 @@ class ESP32PlatformAdapter(Platform):
             logger.error("无效的 JSON 消息: %s", message)
 
     async def _handle_text_message(self, session: DeviceSession, text: str):
-        # 诊断日志
         logger.info(
             "[注入诊断] live2d_injection_enabled=%s, text='%s'",
             self.config.get('live2d_injection_enabled', True),
@@ -357,7 +414,6 @@ class ESP32PlatformAdapter(Platform):
                 if curr_cid:
                     conv = await conv_mgr.get_conversation(uid, curr_cid)
                     if conv and hasattr(conv, 'history'):
-                        # 处理 conv.history 可能是 JSON 字符串的情况
                         if isinstance(conv.history, str):
                             try:
                                 history_list = json.loads(conv.history)
