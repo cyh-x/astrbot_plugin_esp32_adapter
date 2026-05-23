@@ -437,16 +437,12 @@ class ESP32PlatformAdapter(Platform):
                             )
 
                             if not already_injected:
-                                prompt_template = self.config.get(
-                                    "live2d_injection_prompt",
-                                    "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想表达情绪时，请在回复文本中插入以下标签：\n"
-                                    "  <emotion=情绪名称>  自动匹配动作+表情，例如 <emotion=happy>、<emotion=sad>、<emotion=angry>、<emotion=surprised>、<emotion=shy>、<emotion=thinking>、<emotion=serious>、<emotion=bye>\n"
-                                    "  <motion=动作名称>  不推荐，直接指定动作名\n"
-                                    "  <expression=表情名称>  不推荐，直接指定表情名\n"
-                                    "可用情绪: {emotions_str}\n"
-                                    "请将标签自然地嵌入到回复文本中。推荐使用 <emotion=xxx> 标签，它会自动从对应类别中随机选择一个动作和表情。"
+                                if not already_injected:
+                                    prompt_template = self.config.get(
+                                        "live2d_injection_prompt",
+                                        "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想表达情绪时，请在回复文本中插入以下标签：\n  <emotion=情绪名称>  自动匹配动作+表情，例如 <emotion=happy>、<emotion=sad>、<emotion=angry>、<emotion=surprised>、<emotion=shy>、<emotion=thinking>、<emotion=serious>、<emotion=bye>\n  <motion=动作名称>  不推荐，直接指定动作名\n  <expression=表情名称>  不推荐，直接指定表情名\n可用情绪: {emotions_str}\n请将标签自然地嵌入到回复文本中。推荐使用 <emotion=xxx> 标签，它会自动从对应类别中随机选择一个动作和表情。"
                                     )
-                                    # 动态获取可用的情绪类别
+                                    # 动态获取可用的情绪类别（而非动作/表情列表）
                                     l2d_service = get_global_service()
                                     avail_emotions = l2d_service.get_available_emotions()
                                     emotions_str = ", ".join(avail_emotions) if avail_emotions else "无可用情绪"
