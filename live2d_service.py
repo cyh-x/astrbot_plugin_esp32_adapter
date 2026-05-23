@@ -332,7 +332,12 @@ class Live2DService:
                     "Rendering may produce incorrect dimensions.", exc
                 )
         # ---------------------------------------------------------------
-
+        # ── 告诉 Live2D 引擎正确的渲染尺寸 ──
+        # 必须调用！否则 Live2DGLWrapper.width/height 保持 0，
+        # clip 管理器恢复 viewport 时会设成 0x0，导致渲染到零空间
+        self._model.Resize(self.width, self.height)
+        logger.info("模型 Resize(%d, %d)", self.width, self.height)
+        # ---------------------------------------------------------------
         self._initialized = True
         self._last_frame_time = time.time()
 
