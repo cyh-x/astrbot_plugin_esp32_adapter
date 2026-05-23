@@ -55,8 +55,7 @@ class DeviceSession:
         "audio_save_dir": "./esp32_audio",
         "max_audio_duration": 60,
         "live2d_injection_enabled": True,
-        "live2d_injection_prompt": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
-        "live2d_models_dir": "/tmp/live2d_models",
+        "live2d_injection_prompt": "【L2D_INJECTED】...",
         "live2d_model_name": "",
     }
 )
