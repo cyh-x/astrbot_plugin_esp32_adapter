@@ -254,6 +254,38 @@ class Live2DService:
 
         self._ensure_xvfb()
 
+
+        # ── 手动创建 EGL OpenGL 上下文（live2d-py 不自建上下文） ──
+        from OpenGL import EGL
+        _egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
+        _major, _minor = EGL.EGLint(), EGL.EGLint()
+        EGL.eglInitialize(_egl_display, _major, _minor)
+        _config_attrs = (EGL.EGLint * 13)(
+            EGL.EGL_SURFACE_TYPE, EGL.EGL_PBUFFER_BIT,
+            EGL.EGL_RENDERABLE_TYPE, EGL.EGL_OPENGL_BIT,
+            EGL.EGL_RED_SIZE, 8,
+            EGL.EGL_GREEN_SIZE, 8,
+            EGL.EGL_BLUE_SIZE, 8,
+            EGL.EGL_ALPHA_SIZE, 8,
+            EGL.EGL_NONE)
+        _cfg = (EGL.EGLConfig * 1)()
+        _num = EGL.EGLint()
+        EGL.eglChooseConfig(_egl_display, _config_attrs, _cfg, 1, _num)
+        _pb_attrs = (EGL.EGLint * 5)(
+            EGL.EGL_WIDTH, self.width,
+            EGL.EGL_HEIGHT, self.height,
+            EGL.EGL_NONE)
+        _surface = EGL.eglCreatePbufferSurface(_egl_display, _cfg[0], _pb_attrs)
+        EGL.eglBindAPI(EGL.EGL_OPENGL_API)
+        _context = EGL.eglCreateContext(_egl_display, _cfg[0], EGL.EGL_NO_CONTEXT, None)
+        EGL.eglMakeCurrent(_egl_display, _surface, _surface, _context)
+        logger.info("EGL OpenGL 上下文创建成功 (Mesa %s)", _major.value)
+        # ────────────────────────────────────────────────────────────
+
+        # Initialise Live2D framework
+        live2d.init()
+        live2d.glInit()
+        
         # Initialise Live2D framework + EGL-backed GL
         live2d.init()
         live2d.glInit()
