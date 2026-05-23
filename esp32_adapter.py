@@ -423,7 +423,6 @@ class ESP32PlatformAdapter(Platform):
                                 history_list = []
                         else:
                             history_list = conv.history
-
                         if isinstance(history_list, list):
                             already_injected = any(
                                 L2D_MARKER in str(
@@ -435,54 +434,32 @@ class ESP32PlatformAdapter(Platform):
                                 "[注入诊断] already_injected=%s, history_len=%d",
                                 already_injected, len(history_list)
                             )
-                                
-                                if not already_injected:
-                                    if not already_injected:
-                                        prompt_template = self.config.get(
-                                            "live2d_injection_prompt",
-                                            "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。..."
-                                        )
-                                        # 获取可用的情绪类别
-                                        l2d_service = get_global_service()
-                                        avail_emotions = l2d_service.get_available_emotions()
-                                        emotions_str = ", ".join(avail_emotions) if avail_emotions else "无可用情绪"
-                                        avail_motions = l2d_service.get_available_motions()
-                                        avail_expressions = l2d_service.get_available_expressions()
-                                        motions_str = ", ".join(avail_motions) if avail_motions else "无可用动作"
-                                        expressions_str = ", ".join(avail_expressions) if avail_expressions else "无可用表情"
-                                        # ★ 只替换一次，把 {emotions_str} 换成实际的情绪列表
-                                        l2d_instruction = prompt_template.replace(
-                                            "{emotions_str}",
-                                            emotions_str
-                                        )
-                                        if not l2d_instruction.startswith(L2D_MARKER):
-                                            l2d_instruction = L2D_MARKER + "\n" + l2d_instruction
-                                        history_list.insert(0, {
-                                            "role": "system",
-                                            "content": l2d_instruction
-                                        })
-                                        await conv_mgr.update_conversation(
-                                            uid, curr_cid, history=history_list
-                                        )
-                                        logger.info(
-                                            "已为设备 %s 注入 Live2D 指令 (情绪: %s)",
-                                            session.device_id, emotions_str
-                                        )
-
+                            if not already_injected:
+                                prompt_template = self.config.get(
+                                    "live2d_injection_prompt",
+                                    "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。..."
+                                )
+                                # 获取可用的情绪类别
+                                l2d_service = get_global_service()
+                                avail_emotions = l2d_service.get_available_emotions()
+                                emotions_str = ", ".join(avail_emotions) if avail_emotions else "无可用情绪"
+                                # 只替换 {emotions_str}
+                                l2d_instruction = prompt_template.replace(
+                                    "{emotions_str}",
+                                    emotions_str
+                                )
                                 if not l2d_instruction.startswith(L2D_MARKER):
                                     l2d_instruction = L2D_MARKER + "\n" + l2d_instruction
-
                                 history_list.insert(0, {
                                     "role": "system",
                                     "content": l2d_instruction
                                 })
-
                                 await conv_mgr.update_conversation(
                                     uid, curr_cid, history=history_list
                                 )
                                 logger.info(
-                                    "已为设备 %s 注入 Live2D 指令 (动作: %s, 表情: %s)",
-                                    session.device_id, motions_str, expressions_str
+                                    "已为设备 %s 注入 Live2D 指令 (情绪: %s)",
+                                    session.device_id, emotions_str
                                 )
 
             except ImportError as e:
