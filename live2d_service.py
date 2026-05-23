@@ -292,7 +292,7 @@ class Live2DService:
 
         # Load model
         self._model = live2d.LAppModel()
-        self._model.LoadModelJson(self.model_path)
+        self._model.LoadModelJson(self.model_path, disable_precision=True)
 
         # 解析 model.json 获取可用动作和表情
         self._parse_available_from_model_json()
