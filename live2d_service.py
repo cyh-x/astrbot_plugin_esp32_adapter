@@ -47,6 +47,7 @@ import numpy as np
 from PIL import Image
 import io
 from astrbot import logger
+from OpenGL import EGL
 
 # ---------------------------------------------------------------------------
 # Live2D package discovery
@@ -261,7 +262,6 @@ class Live2DService:
         self._ensure_xvfb()
 
         # ── 手动创建 EGL OpenGL 上下文（live2d-py 不自建上下文） ──
-        from OpenGL import EGL
         self._egl_display = EGL.eglGetDisplay(EGL.EGL_DEFAULT_DISPLAY)
         _major, _minor = EGL.EGLint(), EGL.EGLint()
         EGL.eglInitialize(self._egl_display, _major, _minor)
@@ -568,25 +568,25 @@ class Live2DService:
         if not self._initialized or not self._model:
             return None
 
-        # ── 每次渲染前重新激活 EGL 上下文（async 循环可能丢失上下文绑定） ──
-        try:
-            from OpenGL import EGL
-            EGL.eglMakeCurrent(self._egl_display, self._egl_surface,
-                               self._egl_surface, self._egl_context)
-        except Exception as ctx_e:
-            logger.warning("eglMakeCurrent in render: %s", ctx_e)
-
         with self._lock:
+            # ── 每次渲染前重新激活 EGL 上下文 ──
+            ok = EGL.eglMakeCurrent(self._egl_display, self._egl_surface,
+                                     self._egl_surface, self._egl_context)
+            if not ok:
+                err_code = EGL.eglGetError()
+                logger.error(
+                    "eglMakeCurrent failed (0x%x) before render — dpy=%s surf=%s ctx=%s",
+                    err_code, self._egl_display, self._egl_surface, self._egl_context,
+                )
+                return self._last_frame
             try:
                 self._model.Update()
                 self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
                 self._model.Draw()
-
                 pixels = self._live2d.readPixels(self.width, self.height)
                 if not pixels:
                     logger.warning("readPixels returned empty.")
                     return self._last_frame
-
                 img_array = (
                     np.frombuffer(pixels, dtype=np.uint8)
                     .reshape(self.height, self.width, 4)
@@ -596,7 +596,6 @@ class Live2DService:
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=self.jpeg_quality)
                 jpeg_bytes = buf.getvalue()
-
                 self._last_frame = jpeg_bytes
                 self._last_frame_time = time.time()
                 return jpeg_bytes
