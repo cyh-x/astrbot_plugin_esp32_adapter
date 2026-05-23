@@ -109,14 +109,24 @@ class Live2DService:
         self._egl_surface = None
         self._egl_context = None
 
-        # ---- motion / expression state ----
         self._current_motion = None
         self._current_expression = None
-
+        self._last_emotion = None
+        self._last_emotion_time = 0.0
+        self._auto_idle_delay = 8.0  # 动作播放完后 N 秒自动回归 idle
+        self._force_idle_next = False  # 标记下一帧强制回归 idle
+        
         # ---- 可用动作 / 表情列表（从 model.json 解析） ----
         self._available_motions = []
         self._available_expressions = []
-
+        
+        # ---- 情绪分类系统 ----
+        # EMOTION_CLASSES 在 _parse_available_from_model_json() 调用后自动生成
+        self.EMOTION_CLASSES = {}       # {情绪分类: [动作名1, 动作名2, ...]}
+        self.EXPRESSION_CLASSES = {}    # {情绪分类: [表情名1, 表情名2, ...]}
+        self.EMOTION_TAG_PATTERN = re.compile(r'<emotion=([^>]+)>', re.IGNORECASE)
+        self.EMOTION_SYNONYMS = {}      # 同义词映射表
+        
         # ---- 实时推送回调（可选） ----
         self._push_handler = None
 
@@ -305,6 +315,11 @@ class Live2DService:
         # 解析 model.json 获取可用动作和表情
         self._parse_available_from_model_json()
 
+        # 自动构建情绪分类系统（根据 motion/expression 名称关键词）
+        self._build_emotion_classification()
+        logger.info("[情绪] 自动分类完成: %d 个情绪类别",
+                     len(self.EMOTION_CLASSES))
+
         # ---- viewport -------------------------------------------------
         _gl_viewport_set = False
         # Attempt 1 – glad (loaded inside live2d-py)
@@ -351,6 +366,19 @@ class Live2DService:
                 logger.info("启动空闲动作 '%s' 失败: %s", idle_name, e)
         else:
             logger.info("模型没有可用的空闲动作")
+
+        # 设置默认表情（如果模型有 idle 或 default 表情文件）
+        for candidate in ['idle', 'default', 'smile01', '']:
+            if not candidate:
+                break
+            if candidate in self._available_expressions:
+                try:
+                    self._model.SetExpression(candidate)
+                    self._current_expression = candidate
+                    logger.info("默认表情 '%s' 已设置", candidate)
+                except Exception:
+                    pass
+                break
 
         # Render the very first frame synchronously NOW
         self._render_and_cache()
@@ -430,7 +458,180 @@ class Live2DService:
             logger.info("Set expression: %s", expression_name)
         except Exception as e:
             logger.error("Failed to set expression '%s': %s", expression_name, e)
+    # ------------------------------------------------------------------
+    # Emotion（情绪）自动控制系统
+    # 1. 根据 motion/expression 名称自动分类
+    # 2. 触发 emotion 标签时从对应类别随机选一个播放
+    # 3. 播放完自动回归 idle
+    # ------------------------------------------------------------------
+    def _build_emotion_classification(self):
+        """
+        根据模型的实际 motion/expression 名称，通过关键词自动归类到情绪类别。
+        同时建立中英文同义词映射。
+        """
+        # ---- 情绪分类关键词规则 ----
+        # motion 名称包含关键词中任意一个即归入该类
+        CLASSIFICATION_RULES = {
+            'happy':     ['smile', 'kandou', 'sing', 'gacha', 'happy', 'joy', 'laugh'],
+            'sad':       ['sad', 'cry', 'crying', 'sorrow'],
+            'angry':     ['angry', 'rage', 'annoy', 'irritated'],
+            'surprised': ['surprised', 'shock', 'kime', 'amaze', 'wonder'],
+            'shy':       ['shame', 'shy', 'embarrass', 'blush'],
+            'thinking':  ['thinking', 'think', 'ponder', 'nf', 'nnf'],
+            'serious':   ['serious', 'determin'],
+            'bye':       ['bye', 'wave', 'goodbye'],
+            'idle':      ['idle', 'breath', 'wait', 'stand'],
+        }
 
+        # ---- 同义词映射（中英文 + 变体） ----
+        self.EMOTION_SYNONYMS = {
+            '开心': 'happy', '高兴': 'happy', '快乐': 'happy', '笑': 'happy',
+            '难过': 'sad', '伤心': 'sad', '悲伤': 'sad', '哭': 'sad',
+            '生气': 'angry', '愤怒': 'angry', '怒': 'angry',
+            '惊讶': 'surprised', '震惊': 'surprised', '吃惊': 'surprised', '惊喜': 'surprised',
+            '害羞': 'shy', '不好意思': 'shy',
+            '思考': 'thinking', '想': 'thinking',
+            '认真': 'serious', '严肃': 'serious',
+            '再见': 'bye', '拜拜': 'bye', '挥手': 'bye',
+            '发呆': 'idle', '待机': 'idle',
+            '喜悦': 'happy', '欢乐': 'happy', '愉快': 'happy',
+            '忧愁': 'sad', '忧郁': 'sad',
+            '狂喜': 'happy', '激动': 'happy', '兴奋': 'happy',
+            '恐惧': 'surprised', '惊吓': 'surprised',
+            '疑惑': 'thinking', '困惑': 'thinking', '犹豫': 'thinking',
+            '爱': 'happy', '喜欢': 'happy', '心动': 'happy',
+        }
+
+        # 构建 motions 分类
+        motion_classes = {}
+        used_motions = set()
+
+        for cat_name, keywords in CLASSIFICATION_RULES.items():
+            matched = []
+            for m in self._available_motions:
+                if m in used_motions:
+                    continue
+                if any(k in m.lower() for k in keywords):
+                    matched.append(m)
+            if matched:
+                motion_classes[cat_name] = matched
+                used_motions.update(matched)
+
+        # 剩余未分类的 motion 放到 'other' 类别
+        unclassified = [m for m in self._available_motions if m not in used_motions]
+        if unclassified:
+            motion_classes['other'] = unclassified
+
+        self.EMOTION_CLASSES = motion_classes
+
+        # 构建 expressions 分类（规则同上）
+        expr_classes = {}
+        used_exprs = set()
+        for cat_name, keywords in CLASSIFICATION_RULES.items():
+            matched = []
+            for e in self._available_expressions:
+                if e in used_exprs:
+                    continue
+                if any(k in e.lower() for k in keywords):
+                    matched.append(e)
+            if matched:
+                expr_classes[cat_name] = matched
+                used_exprs.update(matched)
+
+        unclassified_exprs = [e for e in self._available_expressions if e not in used_exprs]
+        if unclassified_exprs:
+            expr_classes['other'] = unclassified_exprs
+
+        self.EXPRESSION_CLASSES = expr_classes
+
+        logger.info(
+            "[情绪分类] motions: %d 类 %d 个; expressions: %d 类 %d 个",
+            len(motion_classes), len(self._available_motions),
+            len(expr_classes), len(self._available_expressions),
+        )
+
+    def _get_emotion_category(self, emotion_name: str) -> str:
+        """
+        将用户输入的 emotion 名称映射到标准情绪类别。
+        支持中文/英文/同义词/部分匹配。
+        返回标准类别名（如 'happy'），无法映射返回 None。
+        """
+        name = emotion_name.lower().strip()
+
+        # 1. 直接匹配类别名
+        if name in self.EMOTION_CLASSES:
+            return name
+
+        # 2. 查询同义词映射
+        if name in self.EMOTION_SYNONYMS:
+            return self.EMOTION_SYNONYMS[name]
+
+        # 3. 部分匹配（包含关系）
+        for cat_name in self.EMOTION_CLASSES:
+            if name in cat_name or cat_name in name:
+                return cat_name
+
+        # 4. 输入本身就是可用 motion 名，归入 'other'
+        if name in self._available_motions:
+            return 'other'
+
+        return None
+
+    def set_emotion(self, emotion_name: str) -> bool:
+        """
+        通过情绪名称自动触发动画：
+        1. 自动映射到标准情绪类别
+        2. 从该类随机选一个 motion 播放
+        3. 如果有对应表情也自动设置
+        4. 播放完后自动回归 idle
+        """
+        if not self._initialized or not self._model:
+            logger.warning("set_emotion called but service not initialised.")
+            return False
+
+        import random
+        category = self._get_emotion_category(emotion_name)
+
+        if not category:
+            logger.warning("无法识别情绪 '%s'，可用类别: %s",
+                         emotion_name, self.get_available_emotions())
+            return False
+
+        motion_pool = self.EMOTION_CLASSES.get(category, [])
+        expr_pool = self.EXPRESSION_CLASSES.get(category, [])
+
+        if not motion_pool:
+            logger.warning("情绪 '%s' 分类 '%s' 下没有可用动作", emotion_name, category)
+            return False
+
+        # 随机选 motion 和 expression
+        chosen_motion = random.choice(motion_pool)
+        chosen_expr = random.choice(expr_pool) if expr_pool else None
+
+        logger.info("[情绪] %s → %s → motion=%s expr=%s",
+                    emotion_name, category, chosen_motion, chosen_expr or '(无)')
+
+        # FORCE 优先级打断当前动作
+        self.start_motion(chosen_motion, self._live2d.MotionPriority.FORCE)
+
+        # 设置表情（表情文件可能是 0 bytes，忽略错误）
+        if chosen_expr:
+            try:
+                self._model.SetExpression(chosen_expr)
+                self._current_expression = chosen_expr
+            except Exception:
+                pass
+
+        # 记录状态用于自动回归 idle
+        self._last_emotion = category
+        self._last_emotion_time = time.time()
+        self._force_idle_next = False
+
+        return True
+
+    def get_available_emotions(self) -> list:
+        """返回所有可用的情绪类别名称列表（过滤掉 'other'）。"""
+        return [c for c in self.EMOTION_CLASSES if c != 'other'] + (['other'] if 'other' in self.EMOTION_CLASSES else [])
     # ------------------------------------------------------------------
     # 可用动作 / 表情查询
     # ------------------------------------------------------------------
@@ -591,10 +792,24 @@ class Live2DService:
                 )
                 return self._last_frame
     
-            try:
-                self._model.Update()
-                self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
-                self._model.Draw()
+                try:
+                    self._model.Update()
+                    self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
+                    self._model.Draw()
+
+                    # ── 自动回归 idle：触发动作播放完一段时间后回到 idle ──
+                    if (self._last_emotion_time > 0
+                        and time.time() - self._last_emotion_time > self._auto_idle_delay
+                        and self._current_motion != self.get_idle_motion_name()):
+                        idle_name = self.get_idle_motion_name()
+                        if idle_name:
+                            self._model.StartMotion(idle_name, 0, self._live2d.MotionPriority.NORMAL)
+                            self._current_motion = idle_name
+                            self._current_expression = 'idle'
+                            self._last_emotion = 'idle'
+                            self._last_emotion_time = 0.0
+                            logger.debug("自动回归空闲动作: %s", idle_name)
+ 
     
                 # ── 用 glReadPixels 替代 live2d.v2 不支持的 readPixels ──
                 from OpenGL import GL
@@ -637,13 +852,14 @@ class Live2DService:
             text: Raw LLM response text (may contain tags).
 
         Returns:
-            ``(cleaned_text, motion_name, expression_name)``
+            ``(cleaned_text, motion_name, expression_name, emotion_name)``
         """
         if not text:
-            return text, None, None
+            return text, None, None, None
 
         motion = None
         expression = None
+        emotion = None
 
         motion_match = self.MOTION_TAG_PATTERN.search(text)
         if motion_match:
@@ -653,8 +869,12 @@ class Live2DService:
         if expr_match:
             expression = expr_match.group(1).strip()
 
+        emotion_match = self.EMOTION_TAG_PATTERN.search(text)
+        if emotion_match:
+            emotion = emotion_match.group(1).strip()
+
         cleaned = self.ALL_TAGS_PATTERN.sub('', text).strip()
-        return cleaned, motion, expression
+        return cleaned, motion, expression, emotion
 
     # ------------------------------------------------------------------
     # Async continuous rendering
