@@ -1,19 +1,25 @@
 {
-"live2d_injection_enabled": {
-"description": "是否启用 Live2D 指令注入到对话上下文",
-"type": "bool",
-"default": true
-},
-"live2d_injection_prompt": {
-"description": "注入到对话的 Live2D 系统指令",
-"type": "text",
-"default": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
-"hint": "该提示词以 system 角色插入到 ESP32 设备的对话历史最前面，仅首次触发。"
-},
-"live2d_models_dir": {
-"description": "Live2D 模型存放目录",
-"type": "string",
-"default": "/AstrBot/data/live2d_models",
-"hint": "插件启动时自动扫描此目录下的所有子文件夹，发现可用的 Live2D 模型（查找 model.json / *.model3.json）。可在启动日志中查看所有发现的模型。"
-}
+  "live2d_injection_enabled": {
+    "description": "是否启用 Live2D 指令注入到对话上下文",
+    "type": "bool",
+    "default": true
+  },
+  "live2d_injection_prompt": {
+    "description": "注入到对话的 Live2D 系统指令",
+    "type": "text",
+    "default": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。\n\n## 核心规则\n在每次回复时，你必须根据你的情绪状态，在回复文本中**自然地嵌入情绪标签**。\n\n## 情绪标签格式\n<emotion=情绪名称>  —— 自动匹配动作+表情，推荐使用\n\n## 可用情绪类别\n{emotions_str}\n\n## 作用说明\n- 插入 <emotion=happy> 会让角色做出开心的动作和表情\n- 插入 <emotion=sad> 会让角色露出难过的表情\n- 插入 <emotion=angry> 会让角色表达愤怒\n- 以此类推...\n\n## 重要要求\n- **每次回复都必须至少包含一个 <emotion=xxx> 标签**\n- 标签必须嵌入在句子中，例如：\"今天的天气真好啊<emotion=happy>，我们出去玩吧\"\n- 不要单独发送标签，不要放在回复末尾孤立存在\n- 如果一句话里情绪有变化，可以插入多个标签",
+    "hint": "该提示词以 system 角色插入到 ESP32 设备的对话历史最前面。每次设备发消息时都会检查并注入。"
+  },
+  "live2d_models_dir": {
+    "description": "Live2D 模型存放目录",
+    "type": "string",
+    "default": "/AstrBot/data/live2d_models",
+    "hint": "插件启动时自动扫描此目录下的所有子文件夹，发现可用的 Live2D 模型（查找 model.json / *.model3.json）。可在启动日志中查看所有发现的模型。"
+  },
+  "live2d_model_name": {
+    "description": "指定使用的 Live2D 模型名称（对应 live2d_models_dir 下的子文件夹名）",
+    "type": "string",
+    "default": "",
+    "hint": "留空则自动选择第一个发现的模型。可填模型目录名，如 '036_dream_festival_3_ur'"
+  }
 }
