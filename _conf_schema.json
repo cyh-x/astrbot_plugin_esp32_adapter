@@ -1,25 +1,25 @@
 {
-    "live2d_injection_enabled": {
-        "description": "是否启用 Live2D 指令注入到对话上下文",
-        "type": "bool",
-        "default": true
-    },
-    "live2d_injection_prompt": {
-        "description": "注入到对话的 Live2D 系统指令",
-        "type": "text",
-        "default": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
-        "hint": "该提示词以 system 角色插入到 ESP32 设备的对话历史最前面，仅首次触发。"
-    },
-    "live2d_models_dir": {
-        "description": "Live2D 模型存放目录",
-        "type": "string",
-        "default": "/tmp/live2d_models",
-        "hint": "插件启动时自动扫描此目录下的所有子文件夹，发现可用的 Live2D 模型（查找 model.json / *.model3.json）。可在启动日志中查看所有发现的模型。"
-    },
-    "live2d_model_name": {
-        "description": "使用的模型名称（对应 models_dir 下的子文件夹名）",
-        "type": "string",
-        "default": "",
-        "hint": "留空则自动选择第一个发现的模型。例如：填入 tomori 表示使用 /tmp/live2d_models/tomori/ 下的模型。修改后需要重启容器生效。"
-    }
+"live2d_injection_enabled": {
+"description": "是否启用 Live2D 指令注入到对话上下文",
+"type": "bool",
+"default": true
+},
+"live2d_injection_prompt": {
+"description": "注入到对话的 Live2D 系统指令",
+"type": "text",
+"default": "【L2D_INJECTED】\n你是一个搭载了 Live2D 虚拟形象的 AI 助手。当你想通过动作或表情表达情绪时，请在回复文本中插入以下标签：\n  <motion=动作名称>  例如 <motion=TapBody>\n  <expression=表情名称>  例如 <expression=happy>\n可用动作: Idle, TapBody\n可用表情: happy, sad, angry\n不要单独发送这些标签，请将它们自然地嵌入到回复文本中。如果没有合适的动作或表情，可以不添加标签。",
+"hint": "该提示词以 system 角色插入到 ESP32 设备的对话历史最前面，仅首次触发。"
+},
+"live2d_models_dir": {
+"description": "Live2D 模型存放目录",
+"type": "string",
+"default": "/AstrBot/data/live2d_models",
+"hint": "插件启动时自动扫描此目录下的所有子文件夹，发现可用的 Live2D 模型（查找 model.json / *.model3.json）。可在启动日志中查看所有发现的模型。"
+},
+"live2d_model_name": {
+"description": "使用的模型名称（对应 models_dir 下的子文件夹名）",
+"type": "string",
+"default": "036_dream_festival_3_ur",
+"hint": "留空则自动选择第一个发现的模型。例如：填入 036_dream_festival_3_ur 表示使用 /AstrBot/data/live2d_models/036_dream_festival_3_ur/ 下的模型。修改后需要重启容器生效。"
+}
 }
