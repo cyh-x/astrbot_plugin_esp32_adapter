@@ -100,31 +100,34 @@ class ESP32PlatformAdapter(Platform):
     def _resolve_model_path(self) -> str:
         """
         从配置解析模型路径。
-
         流程：
-        1. 读取 `live2d_models_dir` 配置项
-        2. 扫描该目录下的所有子目录，发现可用模型
-        3. 如果 `live2d_model_name` 已配置且存在，选中该模型
-        4. 否则自动选择第一个发现的模型
-
+        1. 从插件配置读取 `live2d_models_dir`
+        2. 从适配器配置读取 `live2d_model_name`
+        3. 扫描该目录下的所有子目录，发现可用模型
+        4. 如果 `live2d_model_name` 已配置且存在，选中该模型
+        5. 否则自动选择第一个发现的模型
         Returns:
             模型文件完整路径（str）。
-
         Raises:
             FileNotFoundError: 未发现任何模型时抛出。
         """
-        models_dir = self.config.get("live2d_models_dir", "/tmp/live2d_models")
+        from .main import get_esp32_plugin_config
+    
+        # 👇 插件配置（_conf_schema.json），共享给所有适配器
+        plugin_config = get_esp32_plugin_config()
+        models_dir = plugin_config.get("live2d_models_dir", "/AstrBot/data/live2d_models")
+    
+        # 👇 适配器自身配置（cmd_config.json → platform_config），每个适配器独立
         model_name = self.config.get("live2d_model_name", "")
-
+    
         # 扫描可用模型
         available = Live2DService.discover_models(models_dir)
-
         if not available:
             raise FileNotFoundError(
                 f"在 {models_dir} 下未发现任何 Live2D 模型。"
                 f"请将模型文件夹放入该目录（每个子目录需包含 model.json 或 *.model3.json）。"
             )
-
+    
         # 如果配置了模型名称
         if model_name:
             if model_name in available:
@@ -135,7 +138,7 @@ class ESP32PlatformAdapter(Platform):
                     "配置的模型 '%s' 未找到。可用模型: %s。将自动选择第一个。",
                     model_name, list(available.keys())
                 )
-
+    
         # 自动选择第一个
         first_name = list(available.keys())[0]
         first_path = available[first_name]
