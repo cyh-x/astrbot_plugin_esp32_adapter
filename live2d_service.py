@@ -573,7 +573,7 @@ class Live2DService:
         """
         if not self._initialized or not self._model:
             return None
-
+    
         with self._lock:
             # ── 每次渲染前重新激活 EGL 上下文 ──
             ok = EGL.eglMakeCurrent(self._egl_display, self._egl_surface,
@@ -585,14 +585,24 @@ class Live2DService:
                     err_code, self._egl_display, self._egl_surface, self._egl_context,
                 )
                 return self._last_frame
+    
             try:
                 self._model.Update()
                 self._live2d.clearBuffer(0.0, 0.0, 0.0, 0.0)
                 self._model.Draw()
-                pixels = self._live2d.readPixels(self.width, self.height)
+    
+                # ── 用 glReadPixels 替代 live2d.v2 不支持的 readPixels ──
+                from OpenGL import GL
+                import ctypes
+                _buf = (ctypes.c_ubyte * (self.width * self.height * 4))()
+                GL.glReadPixels(0, 0, self.width, self.height,
+                                GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, _buf)
+                pixels = bytes(_buf)
+    
                 if not pixels:
                     logger.warning("readPixels returned empty.")
                     return self._last_frame
+    
                 img_array = (
                     np.frombuffer(pixels, dtype=np.uint8)
                     .reshape(self.height, self.width, 4)
@@ -602,9 +612,11 @@ class Live2DService:
                 buf = io.BytesIO()
                 img.save(buf, format='JPEG', quality=self.jpeg_quality)
                 jpeg_bytes = buf.getvalue()
+    
                 self._last_frame = jpeg_bytes
                 self._last_frame_time = time.time()
                 return jpeg_bytes
+    
             except Exception as e:
                 logger.error("Render error: %s", e, exc_info=True)
                 return self._last_frame
